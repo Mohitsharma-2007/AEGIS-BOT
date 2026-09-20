@@ -2,6 +2,94 @@ import fs from 'fs';
 import path from 'path';
 
 /**
+ * Injects modern stealth evasion scripts to mask automation and bypass bot detection
+ */
+export async function applyStealthPatches(target) {
+  const initScript = `
+    // 1. Mask navigator.webdriver
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+    });
+
+    // 2. Emulate realistic plugins array
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+      ],
+    });
+
+    // 3. Emulate default modern languages
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'],
+    });
+
+    // 4. Mock window.chrome object
+    if (!window.chrome) {
+      window.chrome = {
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {}
+      };
+    }
+
+    // 5. Emulate WebGL vendor & renderer
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+      // UNMASKED_VENDOR_WEBGL
+      if (parameter === 37445) return 'Intel Inc.';
+      // UNMASKED_RENDERER_WEBGL
+      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+      return getParameter.apply(this, [parameter]);
+    };
+  `;
+
+  try {
+    if (typeof target.addInitScript === 'function') {
+      await target.addInitScript(initScript);
+    }
+  } catch (err) {
+    console.warn('[Stealth] Could not inject init script:', err.message);
+  }
+}
+
+/**
+ * Recognizes bot challenges, CAPTCHAs, and unusual traffic block pages
+ */
+export async function detectBotWall(page) {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body ? document.body.innerText : '').toLowerCase();
+      const title = (document.title || '').toLowerCase();
+      
+      const botKeywords = [
+        'unusual traffic',
+        'verify you are human',
+        'press & hold',
+        'press and hold',
+        'cloudflare turnstile',
+        'attention required',
+        'recaptcha',
+        'robot or human',
+        'security check to access',
+        'why did this happen'
+      ];
+
+      for (const kw of botKeywords) {
+        if (text.includes(kw) || title.includes(kw)) {
+          return { isBlocked: true, keyword: kw, title: document.title };
+        }
+      }
+      return { isBlocked: false };
+    });
+  } catch {
+    return { isBlocked: false };
+  }
+}
+
+/**
  * Base Abstract Browser Runtime
  */
 export class BrowserRuntime {

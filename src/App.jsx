@@ -22,6 +22,7 @@ export function App() {
     providers,
     activeProvider,
     activeModel,
+    tools,
     events,
     toolCalls,
     domElements,
@@ -155,6 +156,7 @@ export function App() {
         <DevToolsDrawer
           domElements={domElements}
           a11yNodes={a11yNodes}
+          tools={tools}
           toolCalls={toolCalls}
           events={events}
           providers={providers}

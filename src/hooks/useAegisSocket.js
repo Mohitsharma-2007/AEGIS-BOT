@@ -47,6 +47,7 @@ export function useAegisSocket() {
             setConnected(true);
             if (data.default_provider) setActiveProvider(data.default_provider);
             if (data.default_model) setActiveModel(data.default_model);
+            if (data.tools) setTools(data.tools);
           }
         })
         .catch(() => {});
@@ -227,11 +228,25 @@ export function useAegisSocket() {
           if (data.frame) setScreencastFrame(data.frame);
           if (data.tabs) setTabs(data.tabs);
           if (data.domElements) setDomElements(data.domElements);
+          if (data.toolCalls && data.toolCalls.length) {
+            setToolCalls(prev => [...prev, ...data.toolCalls]);
+          }
+          if (data.notes && data.notes.length) {
+            setNotes(prev => [...data.notes, ...prev]);
+          }
+          if (data.thought) {
+            setLatestThought({ thought: data.thought, phase: data.phase || 'reasoning', timestamp: Date.now() });
+          }
           setAgentState(prev => ({
             ...prev,
             status: 'completed',
-            plan: prev.plan?.map(p => ({ ...p, status: 'completed' })) || null,
-            currentAction: `Completed. Active page: ${data.title || 'Ready'}`
+            plan: data.plan || prev.plan?.map(p => ({ ...p, status: 'completed' })) || null,
+            currentAction: {
+              name: 'Task Complete',
+              target: data.title || 'Target Reached',
+              method: data.bot_status?.isBlocked ? 'Adaptive Stealth Pivot' : 'Aegis Browser Engine',
+              status: 'completed'
+            }
           }));
         })
         .catch(err => {

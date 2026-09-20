@@ -19,7 +19,8 @@ export class ToolRegistry {
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
-      permissions: t.permissions || ['read']
+      permissions: t.permissions || ['read'],
+      category: t.category || 'General Browser'
     }));
   }
 

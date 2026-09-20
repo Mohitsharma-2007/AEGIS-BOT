@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import { globalEventBus } from '../events/event-bus.js';
 import { extractInteractiveDom, highlightElement, clearHighlight } from './dom-extractor.js';
 import { extractAccessibilityTree } from './a11y-extractor.js';
-import { getBrowserRuntime } from './runtime.js';
+import { getBrowserRuntime, applyStealthPatches, detectBotWall } from './runtime.js';
 
 export class BrowserSessionManager {
   constructor(options = {}) {
@@ -42,8 +42,13 @@ export class BrowserSessionManager {
       this.context = await this.browser.newContext({
         viewport: this.viewport,
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 AegisBot/1.0',
+        locale: 'en-US',
+        timezoneId: 'Asia/Kolkata',
         deviceScaleFactor: 1
       });
+
+      // Inject modern anti-bot stealth scripts
+      await applyStealthPatches(this.context);
 
       // Create initial tab
       await this.createTab('https://www.google.com');
