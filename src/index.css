@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --aegis-bg: #08090B;
+  --aegis-panel: #111318;
+  --aegis-card: #14171E;
+  --aegis-border: rgba(255, 255, 255, 0.08);
+  --aegis-accent: #00F2FE;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: #08090B;
+  color: #F5F5F5;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Micro Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Subtle Technical Panel Treatment */
+.aegis-panel {
+  background: #111318;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.aegis-card {
+  background: #14171E;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.aegis-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Subtle Focus Animation */
+.aegis-focus {
+  transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.aegis-focus:focus-within,
+.aegis-focus:focus {
+  border-color: rgba(0, 242, 254, 0.4);
+  box-shadow: 0 0 0 1px rgba(0, 242, 254, 0.2), 0 0 16px -2px rgba(0, 242, 254, 0.15);
+}
+
+/* Orbit and Pulse Keyframes for AEGIS Avatar & Cursor */
+@keyframes aegis-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes aegis-pulse {
+  0%, 100% { opacity: 0.9; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.92); }
+}
+
+@keyframes aegis-breathe {
+  0%, 100% { opacity: 0.8; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.04); }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.5); opacity: 0.9; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+.animate-aegis-orbit {
+  animation: aegis-orbit 4s linear infinite;
+}
+
+.animate-aegis-pulse {
+  animation: aegis-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-aegis-breathe {
+  animation: aegis-breathe 3s ease-in-out infinite;
+}
+
+.click-pulse {
+  animation: pulse-ring 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
