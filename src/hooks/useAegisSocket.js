@@ -29,9 +29,29 @@ export function useAegisSocket() {
   const wsRef = useRef(null);
 
   useEffect(() => {
-    const wsUrl = `ws://${window.location.hostname}:3001`;
+    // Resolve WebSocket URL: prefer explicit env var, fallback to local port 3001 on localhost
+    const configuredWs = import.meta.env.VITE_BACKEND_WS_URL;
+    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const wsUrl = configuredWs || (isLocalhost ? `ws://${window.location.hostname}:3001` : null);
+
     let ws = null;
     let reconnectTimer = null;
+
+    if (!wsUrl) {
+      // Running on Cloud (Vercel) without a dedicated persistent WebSocket server:
+      // Fetch status via Serverless API routes
+      fetch('/api/health')
+        .then(r => r.json())
+        .then(data => {
+          if (data.status === 'online') {
+            setConnected(true);
+            if (data.default_provider) setActiveProvider(data.default_provider);
+            if (data.default_model) setActiveModel(data.default_model);
+          }
+        })
+        .catch(() => {});
+      return;
+    }
 
     function connect() {
       try {
@@ -40,7 +60,7 @@ export function useAegisSocket() {
 
         ws.onopen = () => {
           setConnected(true);
-          console.log('[AEGIS WS] Connected to backend event stream');
+          console.log('[AEGIS WS] Connected to backend event stream:', wsUrl);
         };
 
         ws.onmessage = (e) => {
@@ -54,14 +74,14 @@ export function useAegisSocket() {
 
         ws.onclose = () => {
           setConnected(false);
-          reconnectTimer = setTimeout(connect, 2000);
+          reconnectTimer = setTimeout(connect, 3000);
         };
 
         ws.onerror = () => {
           ws.close();
         };
       } catch (err) {
-        reconnectTimer = setTimeout(connect, 2000);
+        reconnectTimer = setTimeout(connect, 3000);
       }
     }
 

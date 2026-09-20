@@ -109,7 +109,23 @@ export class ManagedChromiumRuntime extends BrowserRuntime {
   async getLaunchOptions(baseArgs = []) {
     const headless = process.env.HEADLESS === 'false' ? false : true;
 
-    // If an explicit managed binary is provided (e.g. Lambda/Serverless Chromium layer)
+    let executablePath = this.customPath;
+    let extraArgs = [];
+
+    // If running on Vercel / AWS Lambda / Linux cloud, dynamically resolve @sparticuz/chromium
+    if (!executablePath && (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.platform === 'linux')) {
+      try {
+        const chromiumModule = await import('@sparticuz/chromium');
+        const sparticuz = chromiumModule.default || chromiumModule;
+        executablePath = await sparticuz.executablePath();
+        if (sparticuz.args && Array.isArray(sparticuz.args)) {
+          extraArgs = sparticuz.args;
+        }
+      } catch (err) {
+        console.warn('[ManagedChromium] Notice: @sparticuz/chromium auto-resolution deferred to Playwright:', err.message);
+      }
+    }
+
     const options = {
       headless,
       args: [
@@ -122,14 +138,14 @@ export class ManagedChromiumRuntime extends BrowserRuntime {
         '--allow-running-insecure-content',
         '--single-process',
         '--no-zygote',
+        ...extraArgs,
         ...baseArgs
       ]
     };
 
-    if (this.customPath && fs.existsSync(this.customPath)) {
-      options.executablePath = this.customPath;
+    if (executablePath && fs.existsSync(executablePath)) {
+      options.executablePath = executablePath;
     }
-    // Note: When executablePath is omitted, Playwright automatically uses its managed Chromium binary
 
     return options;
   }
