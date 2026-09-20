@@ -60,7 +60,17 @@ export async function applyStealthPatches(target) {
  */
 export async function detectBotWall(page) {
   try {
+    const curUrl = page.url() || '';
+    if (curUrl.includes('chrome-error') || curUrl.includes('chromewebdata')) {
+      return { isBlocked: true, keyword: 'network_reset_or_datacenter_block', title: 'Network Blocked' };
+    }
+
     return await page.evaluate(() => {
+      const url = window.location.href || '';
+      if (url.includes('chrome-error') || url.includes('chromewebdata')) {
+        return { isBlocked: true, keyword: 'network_reset_or_datacenter_block', title: 'Network Blocked' };
+      }
+
       const text = (document.body ? document.body.innerText : '').toLowerCase();
       const title = (document.title || '').toLowerCase();
       
@@ -74,7 +84,9 @@ export async function detectBotWall(page) {
         'recaptcha',
         'robot or human',
         'security check to access',
-        'why did this happen'
+        'why did this happen',
+        'access denied',
+        '403 forbidden'
       ];
 
       for (const kw of botKeywords) {
