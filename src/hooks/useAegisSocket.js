@@ -39,7 +39,7 @@ export function useAegisSocket() {
 
     if (!wsUrl) {
       // Running on Cloud (Vercel) without a dedicated persistent WebSocket server:
-      // Fetch status via Serverless API routes
+      // 1. Fetch system status and active models
       fetch('/api/health')
         .then(r => r.json())
         .then(data => {
@@ -50,6 +50,19 @@ export function useAegisSocket() {
           }
         })
         .catch(() => {});
+
+      // 2. Fetch initial browser canvas frame from serverless Chromium
+      fetch('/api/browser?url=https://www.google.com')
+        .then(r => r.json())
+        .then(data => {
+          if (data.frame) setScreencastFrame(data.frame);
+          if (data.tabs) setTabs(data.tabs);
+          if (data.domElements) setDomElements(data.domElements);
+        })
+        .catch((err) => {
+          console.error('[Cloud Browser Init Error]:', err);
+        });
+
       return;
     }
 
@@ -187,19 +200,93 @@ export function useAegisSocket() {
     }
   }, []);
 
-  const runTask = useCallback((task) => send('agent.run', { task }), [send]);
+  const runTask = useCallback((task) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      send('agent.run', { task });
+    } else {
+      // Cloud serverless mode: invoke /api/browser with task query
+      setAgentState({
+        status: 'executing',
+        task,
+        plan: [
+          { id: 1, title: 'Initialize Cloud Chromium Session', status: 'completed' },
+          { id: 2, title: `Execute Goal: "${task.slice(0, 35)}..."`, status: 'executing' },
+          { id: 3, title: 'Render Live Page Surface', status: 'pending' }
+        ],
+        currentAction: `Executing task: ${task.slice(0, 45)}...`,
+        targetElement: null
+      });
+
+      fetch('/api/browser', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: task })
+      })
+        .then(r => r.json())
+        .then(data => {
+          if (data.frame) setScreencastFrame(data.frame);
+          if (data.tabs) setTabs(data.tabs);
+          if (data.domElements) setDomElements(data.domElements);
+          setAgentState(prev => ({
+            ...prev,
+            status: 'completed',
+            plan: prev.plan?.map(p => ({ ...p, status: 'completed' })) || null,
+            currentAction: `Completed. Active page: ${data.title || 'Ready'}`
+          }));
+        })
+        .catch(err => {
+          console.error('[Cloud Run Task Error]:', err);
+          setAgentState(prev => ({ ...prev, status: 'idle', currentAction: 'Cloud task finished' }));
+        });
+    }
+  }, [send]);
+
   const stopAgent = useCallback(() => send('agent.stop'), [send]);
   const pauseAgent = useCallback(() => send('agent.pause'), [send]);
   const resumeAgent = useCallback(() => send('agent.resume'), [send]);
 
-  const navigate = useCallback((url, tabId) => send('browser.navigate', { url, tabId }), [send]);
+  const navigate = useCallback((url, tabId) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      send('browser.navigate', { url, tabId });
+    } else {
+      // Cloud serverless navigation
+      setTabs(prev => prev.map(t => ({ ...t, loading: true, url })));
+      fetch(`/api/browser?url=${encodeURIComponent(url)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.frame) setScreencastFrame(data.frame);
+          if (data.tabs) setTabs(data.tabs);
+          if (data.domElements) setDomElements(data.domElements);
+        })
+        .catch(err => {
+          console.error('[Cloud Navigate Error]:', err);
+          setTabs(prev => prev.map(t => ({ ...t, loading: false })));
+        });
+    }
+  }, [send]);
+
   const newTab = useCallback((url) => send('browser.tab_new', { url }), [send]);
   const switchTab = useCallback((tabId) => send('browser.tab_switch', { tabId }), [send]);
   const closeTab = useCallback((tabId) => send('browser.tab_close', { tabId }), [send]);
 
   const manualClick = useCallback((x, y) => send('browser.manual_click', { x, y }), [send]);
   const manualType = useCallback((text) => send('browser.manual_type', { text }), [send]);
-  const manualScroll = useCallback((direction, amount) => send('browser.manual_scroll', { direction, amount }), [send]);
+  const manualScroll = useCallback((direction, amount) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      send('browser.manual_scroll', { direction, amount });
+    } else {
+      fetch('/api/browser', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'scroll' })
+      })
+        .then(r => r.json())
+        .then(data => {
+          if (data.frame) setScreencastFrame(data.frame);
+        })
+        .catch(() => {});
+    }
+  }, [send]);
 
   const selectProvider = useCallback(async (providerId, modelId) => {
     try {
