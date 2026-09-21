@@ -1,18 +1,11 @@
-/**
- * AEGIS Intent & Entity Extraction Engine
- * Parses natural language user instructions to extract clean search queries,
- * credentials (User ID, Password, Email), confidential information (OTP, 2FA, PIN),
- * explicit form key-value fields, and workflow intent.
- * 
- * Prevents raw instructional prompts (like "login with these credentials : User ID : XYZ...")
- * from ever being mistakenly typed into form inputs.
- */
+import assert from 'assert';
 
-export function extractTaskEntities(taskDescription) {
+function extractTaskEntities(taskDescription) {
   if (!taskDescription || typeof taskDescription !== 'string') {
     return {
       isLogin: false,
       isFormFilling: false,
+      shouldContinue: false,
       hasCredentials: false,
       credentials: null,
       fields: {},
@@ -35,7 +28,6 @@ export function extractTaskEntities(taskDescription) {
   const stopWords = ['to', 'this', 'site', 'open', 'http', 'https', 'these', 'with', 'and', 'for', 'a', 'the', 'is', 'being', 'of', 'credentials'];
 
   // 2. Extract Username / User ID / Email / Enrollment
-  // Supports: "login | 12338591", "login : 12338591", "User ID : XYZ", "User ID: XYZ", "Username: XYZ", "ID : 12338591"
   const userMatches = [...raw.matchAll(/(?:user\s*(?:id|name)?|login|email|account|id|enrollment|roll(?:\s*no)?)\s*[:=|/-]\s*["']?([^"',;\s\n]+)["']?/gi)];
   for (const m of userMatches) {
     const candidate = m[1].trim();
@@ -53,7 +45,6 @@ export function extractTaskEntities(taskDescription) {
   }
 
   // 3. Extract Password / Pass / Pwd
-  // Supports: "Pass : Mohit@6050", "Pass: 123", "Password: 123", "Pwd: 123"
   const passMatches = [...raw.matchAll(/(?:pass(?:word)?|pwd)\s*[:=|/-]\s*["']?([^"',;\s\n]+)["']?/gi)];
   for (const m of passMatches) {
     const candidate = m[1].trim();
@@ -73,8 +64,7 @@ export function extractTaskEntities(taskDescription) {
   if (username) fields.username = username;
   if (password) fields.password = password;
 
-  // 4. Extract Generic Form Fields (Clean key-value tokens after delimiters)
-  // e.g. "Name: Alice", "Email: alice@example.com", "Phone: 99999"
+  // 4. Extract Generic Form Fields
   const cleanTokens = raw.split(/[,;\n]|(?:\band\b)/i);
   for (const token of cleanTokens) {
     const kv = token.match(/(?:(?:fill|enter|input|with)?\s+)?([a-zA-Z\s_]{2,20})\s*[:=]\s*["']?([^"',;\n]+)["']?/i);
@@ -85,12 +75,6 @@ export function extractTaskEntities(taskDescription) {
         fields[key] = val;
       }
     }
-  }
-
-  // Check for confidential tokens (OTP, 2FA, PIN)
-  const otpMatch = raw.match(/(?:otp|2fa|code|pin)\s*[:=]?\s*([0-9]{4,8})/i);
-  if (otpMatch) {
-    fields.otp = otpMatch[1].trim();
   }
 
   // 5. Detect Target Site or Domain
@@ -107,14 +91,13 @@ export function extractTaskEntities(taskDescription) {
   } else if (lower.includes('wikipedia')) {
     targetSite = 'https://en.wikipedia.org';
   } else {
-    // Try to extract domain like "login to example.com"
     const domainMatch = raw.match(/\b([a-zA-Z0-9-]+\.(?:com|org|io|net|in|ai|co))\b/i);
     if (domainMatch) {
       targetSite = `https://${domainMatch[1]}`;
     }
   }
 
-  // 6. Compute Clean Search Query (Stripping instructional phrases and credentials)
+  // 6. Compute Clean Search Query
   let cleanQuery = raw;
 
   cleanQuery = cleanQuery
@@ -159,3 +142,14 @@ export function extractTaskEntities(taskDescription) {
     targetSite
   };
 }
+
+const testPrompt = 'Login to this Site : open https://s.amizone.net/ then login | 12338591 and Pass : Mohit@6050';
+const res = extractTaskEntities(testPrompt);
+console.log('Result for user prompt:', res);
+assert.strictEqual(res.isLogin, true);
+assert.strictEqual(res.hasCredentials, true);
+assert.strictEqual(res.credentials.username, '12338591');
+assert.strictEqual(res.credentials.password, 'Mohit@6050');
+assert.strictEqual(res.targetSite, 'https://s.amizone.net/');
+assert.strictEqual(res.cleanQuery, 's.amizone.net');
+console.log('✓ All extraction assertions passed!');

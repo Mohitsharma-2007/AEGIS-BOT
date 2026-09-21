@@ -26,7 +26,7 @@ export async function inspectCloudflareVerification(page) {
 
       // 1. Check for Turnstile / Challenge response tokens
       const tokenInputs = Array.from(document.querySelectorAll(
-        'input[name="cf-turnstile-response"], input[name="cf_challenge_response"], input[name*="turnstile-response"], input[name*="cf-chl-widget-"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"], textarea[name="h-captcha-response"], input[name="h-captcha-response"]'
+        'input[name="cf-turnstile-response"], input[name="cf_challenge_response"], input[name*="turnstile-response"], input[name*="cf-chl-widget-"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"], input#RecaptchaToken, input[name="RecaptchaToken"], textarea[name="h-captcha-response"], input[name="h-captcha-response"]'
       ));
 
       let hasToken = false;
@@ -47,12 +47,12 @@ export async function inspectCloudflareVerification(page) {
 
       // 3. Check for Challenge Iframes
       const challengeIframe = document.querySelector(
-        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="cf-turnstile"], iframe[title*="cloudflare" i], iframe[title*="turnstile" i], iframe[title*="security challenge" i], iframe[title*="widget containing a cloudflare security challenge" i]'
+        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="cf-turnstile"], iframe[title*="cloudflare" i], iframe[title*="turnstile" i], iframe[title*="security challenge" i], iframe[title*="widget containing a cloudflare security challenge" i], #Capthcadiv iframe'
       );
 
       // 4. Check for Challenge Stages / Containers
       const challengeStage = document.querySelector(
-        '#challenge-stage, #cf-stage, .cf-turnstile, #turnstile-wrapper, #challenge-running, #cf-challenge-running, #cf-wrapper, #challenge-form'
+        '#challenge-stage, #cf-stage, .cf-turnstile, #turnstile-wrapper, #challenge-running, #cf-challenge-running, #cf-wrapper, #challenge-form, #Capthcadiv, div[id*="captcha" i], div[class*="captcha" i]'
       );
 
       // 5. Check for Active Loading Spinners ("cloudflareverfy loading spins")
@@ -86,8 +86,9 @@ export async function inspectCloudflareVerification(page) {
       let needsClick = false;
 
       if (hasChallenge && !isVerified && !isSpinning) {
-        if (challengeIframe) {
-          const rect = challengeIframe.getBoundingClientRect();
+        const targetFrame = challengeIframe || (challengeStage ? challengeStage.querySelector('iframe') : null);
+        if (targetFrame) {
+          const rect = targetFrame.getBoundingClientRect();
           if (rect.width > 10 && rect.height > 10) {
             needsClick = true;
             clickTarget = {
