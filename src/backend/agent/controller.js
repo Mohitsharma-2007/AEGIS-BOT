@@ -567,18 +567,35 @@ Return STRICT JSON:
       globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
       this.broadcastState();
 
-      // Step A: Engage patient Cloudflare spinner verification engine
+      // Step A: Engage patient Cloudflare spinner verification engine with retry strategy
       this.emitThought(`Engaging patient Cloudflare verification engine (watching spinner & solving checkbox)...`, 'recovery');
-      const { waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
+      const { waitForCloudflareVerification, handleCloudflareBlockWithRetry } = await import('../browser/cloudflare-verifier.js');
       const solveRes = await waitForCloudflareVerification(activeTab.page, {
-        maxWaitMs: 25000,
-        pollIntervalMs: 600,
+        maxWaitMs: 45000,
+        pollIntervalMs: 400,
         sessionManager: this.sessionManager,
         allowClick: true,
         onThought: (msg, type) => this.emitThought(msg, type)
       });
 
       if (signal.aborted) return true;
+
+      // If initial attempt failed, escalate to multi-attempt retry with session rotation
+      if (!solveRes.verified && solveRes.timedOut) {
+        this.emitThought('🔄 Initial Cloudflare verification timed out. Escalating to multi-attempt bypass strategy...', 'recovery');
+        const retryRes = await handleCloudflareBlockWithRetry(activeTab.page, {
+          targetUrl: activeTab.url,
+          sessionManager: this.sessionManager,
+          onThought: (msg, type) => this.emitThought(msg, type),
+          maxAttempts: 3
+        });
+
+        if (signal.aborted) return true;
+
+        if (!retryRes.verified) {
+          this.emitThought('⚠️ Cloudflare bypass exhausted all attempts. The site may require a different network or manual verification.', 'recovery');
+        }
+      }
 
       // Step B: Observe page reload & verify fresh DOM state
       this.emitThought(`Observing post-challenge page reload and capturing updated screenshot...`, 'observation');
@@ -636,23 +653,60 @@ Return STRICT JSON:
       }
 
       // =========================================================================
-      // 1. Initial Site Navigation
+      // 1. Initial Site Navigation with Human Warmup & Referrer Chain
       // =========================================================================
       if (stepCount === 1) {
         let targetUrl = intent.targetSite;
         const curUrl = activeTab.url.toLowerCase();
 
         if (targetUrl && !curUrl.includes(new URL(targetUrl).hostname)) {
+          // ─── PRE-NAVIGATION HUMAN WARMUP ───
+          // Spend 2-3s performing natural human actions on the current page
+          // to build activity reputation before hitting a CF-protected site
+          this.emitThought(`Pre-navigation warmup: Performing natural human activity before navigating to ${targetUrl}...`, 'reasoning');
+          
+          const warmupDuration = 2000 + Math.random() * 1000; // 2-3s
+          const warmupStart = Date.now();
+          while (Date.now() - warmupStart < warmupDuration) {
+            const rx = 100 + Math.floor(Math.random() * 800);
+            const ry = 100 + Math.floor(Math.random() * 500);
+            try {
+              await this.sessionManager.moveMouse(rx, ry);
+            } catch {}
+            await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+          }
+
+          // Optional: Scroll slightly to mimic real user behavior
+          try {
+            await this.sessionManager.scroll('down', 100 + Math.floor(Math.random() * 200));
+            await new Promise(r => setTimeout(r, 300));
+          } catch {}
+
           this.emitThought(`Navigating to target destination: ${targetUrl}...`, 'navigation');
           this.currentAction = {
             name: 'Navigating to destination',
             target: targetUrl,
-            method: 'browser.navigate',
+            method: 'browser.navigate (Stealth + Warmup)',
             status: 'executing'
           };
           this.broadcastState();
           await globalToolRegistry.execute('browser.navigate', { url: targetUrl });
-          await new Promise(r => setTimeout(r, 1400));
+          
+          // Post-navigation patience: Wait 2-4s before any interaction
+          // to let Cloudflare's userActive detection kick in
+          this.emitThought(`Post-navigation settling: Waiting for page to fully stabilize...`, 'observation');
+          await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
+          
+          // Perform subtle mouse micro-movements to trigger Cloudflare's userActive flag
+          for (let i = 0; i < 3; i++) {
+            const mx = 200 + Math.floor(Math.random() * 600);
+            const my = 150 + Math.floor(Math.random() * 400);
+            try {
+              await this.sessionManager.moveMouse(mx, my);
+            } catch {}
+            await new Promise(r => setTimeout(r, 150 + Math.random() * 200));
+          }
+
           // Observe visual screenshot immediately after initial navigation
           await this.observePageLoadAndDetectChallenges(activeTab, signal);
           continue;
@@ -816,7 +870,7 @@ Return STRICT JSON:
           if (typeof userActive !== 'undefined') userActive = true;
         }).catch(() => {});
 
-        const { inspectCloudflareVerification, waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
+        const { inspectCloudflareVerification, waitForCloudflareVerification, handleCloudflareBlockWithRetry } = await import('../browser/cloudflare-verifier.js');
         let turnstileState = await inspectCloudflareVerification(activeTab.page);
 
         if (turnstileState.hasChallenge && !turnstileState.isVerified) {
@@ -825,13 +879,24 @@ Return STRICT JSON:
             'recovery'
           );
 
-          await waitForCloudflareVerification(activeTab.page, {
-            maxWaitMs: 30000,
-            pollIntervalMs: 600,
+          const verifyResult = await waitForCloudflareVerification(activeTab.page, {
+            maxWaitMs: 45000,
+            pollIntervalMs: 400,
             sessionManager: this.sessionManager,
             allowClick: true,
             onThought: (msg, type) => this.emitThought(msg, type)
           });
+
+          // If initial attempt failed, try retry strategy
+          if (!verifyResult.verified && verifyResult.timedOut) {
+            this.emitThought('🔄 Login Turnstile verification timed out. Escalating to retry bypass...', 'recovery');
+            await handleCloudflareBlockWithRetry(activeTab.page, {
+              targetUrl: activeTab.url,
+              sessionManager: this.sessionManager,
+              onThought: (msg, type) => this.emitThought(msg, type),
+              maxAttempts: 2
+            });
+          }
 
           // Re-inspect state
           turnstileState = await inspectCloudflareVerification(activeTab.page);

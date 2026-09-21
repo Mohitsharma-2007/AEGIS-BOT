@@ -201,14 +201,16 @@ export async function inspectCloudflareVerification(page) {
 /**
  * Patiently waits for the Cloudflare verification spinner to finish spinning and resolve.
  * 
- * If a checkbox is present and unclicked, clicks it with curved human physics.
- * Then enters a patient polling loop (up to 25s), emitting informative ReAct thoughts,
- * until the verification spinner finishes and the verification token is acquired.
+ * Enhanced with:
+ * - 45s max wait (up from 25s) for datacenter IP processing
+ * - Exponential backoff polling (400ms → 1200ms)
+ * - Up to 3 retry clicks on Turnstile checkbox with randomized delays
+ * - Human activity simulation (mouse wiggles) during wait to maintain "userActive" flag
  * 
  * @param {import('playwright').Page} page 
  * @param {Object} options 
- * @param {number} [options.maxWaitMs=25000] Maximum patient wait time in ms
- * @param {number} [options.pollIntervalMs=600] Interval between checks in ms
+ * @param {number} [options.maxWaitMs=45000] Maximum patient wait time in ms
+ * @param {number} [options.pollIntervalMs=400] Starting interval between checks in ms
  * @param {Function} [options.onThought] Callback to emit live ReAct thoughts
  * @param {Object} [options.sessionManager] Session manager for human curved clicking
  * @param {boolean} [options.allowClick=true] Whether to click checkbox if unclicked
@@ -216,8 +218,8 @@ export async function inspectCloudflareVerification(page) {
  */
 export async function waitForCloudflareVerification(page, options = {}) {
   const {
-    maxWaitMs = 25000,
-    pollIntervalMs = 600,
+    maxWaitMs = 45000,
+    pollIntervalMs = 400,
     onThought = null,
     sessionManager = null,
     allowClick = true
@@ -237,7 +239,7 @@ export async function waitForCloudflareVerification(page, options = {}) {
     return { detected: true, verified: true, token: state.token, elapsedMs: 0 };
   }
 
-  onThought?.('👁️ [Cloudflare Verification]: Security challenge detected on page. Initiating patient verification...', 'recovery');
+  onThought?.('👁️ [Cloudflare Verification]: Security challenge detected on page. Initiating patient verification with exponential backoff...', 'recovery');
 
   // 2. Click Checkbox if needed with Human Curved Mouse
   if (state.needsClick && !state.isSpinning && allowClick && state.clickTarget) {
@@ -258,11 +260,12 @@ export async function waitForCloudflareVerification(page, options = {}) {
     await new Promise(r => setTimeout(r, 900)); // Natural pause for spinner to spin
   }
 
-  // 3. PATIENCE POLLING LOOP
-  // Let the cloudflare verify loading spinner spin until verification completes!
+  // 3. PATIENCE POLLING LOOP WITH EXPONENTIAL BACKOFF
   const startTime = Date.now();
   let lastReportTime = 0;
-  let retryClickDone = false;
+  let retryClickCount = 0;
+  const maxRetryClicks = 3;
+  let currentPollInterval = pollIntervalMs; // Starts at 400ms, grows to 1200ms
 
   while (Date.now() - startTime < maxWaitMs) {
     const elapsedMs = Date.now() - startTime;
@@ -291,8 +294,8 @@ export async function waitForCloudflareVerification(page, options = {}) {
       return { detected: true, verified: true, redirected: true, elapsedMs };
     }
 
-    // Active Spinning: Report patience update every 2 seconds
-    if (Date.now() - lastReportTime >= 2000) {
+    // Active Spinning: Report patience update every 3 seconds
+    if (Date.now() - lastReportTime >= 3000) {
       lastReportTime = Date.now();
       if (state.isSpinning) {
         onThought?.(
@@ -305,23 +308,44 @@ export async function waitForCloudflareVerification(page, options = {}) {
           'recovery'
         );
       }
+
+      // Simulate human activity during wait to keep userActive flag alive
+      try {
+        const wiggleX = 200 + Math.floor(Math.random() * 400);
+        const wiggleY = 200 + Math.floor(Math.random() * 300);
+        await page.mouse.move(wiggleX, wiggleY).catch(() => {});
+      } catch {}
     }
 
-    // Check if after 4 seconds it remained unclicked and still needs a click
-    if (state.needsClick && !state.isSpinning && elapsedMs > 4000 && !retryClickDone && allowClick && state.clickTarget) {
-      retryClickDone = true;
-      onThought?.('Re-engaging curved human click on Turnstile checkbox to initiate spinner...', 'action');
-      const targetX = state.clickTarget.x + Math.floor((Math.random() - 0.5) * 6);
-      const targetY = state.clickTarget.y + Math.floor((Math.random() - 0.5) * 6);
+    // Retry clicks: at 5s, 12s, and 20s if still needs clicking and not spinning
+    const retryThresholds = [5000, 12000, 20000];
+    if (
+      state.needsClick &&
+      !state.isSpinning &&
+      allowClick &&
+      state.clickTarget &&
+      retryClickCount < maxRetryClicks &&
+      elapsedMs > retryThresholds[retryClickCount]
+    ) {
+      retryClickCount++;
+      onThought?.(`🖱️ [Retry ${retryClickCount}/${maxRetryClicks}]: Re-engaging curved human click on Turnstile checkbox...`, 'action');
+
+      // Random pre-click delay (300-800ms) to appear more human
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
+
+      const targetX = state.clickTarget.x + Math.floor((Math.random() - 0.5) * 8);
+      const targetY = state.clickTarget.y + Math.floor((Math.random() - 0.5) * 8);
       if (sessionManager && typeof sessionManager.click === 'function') {
         await sessionManager.click(targetX, targetY);
       } else {
         await page.mouse.click(targetX, targetY);
       }
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 800 + Math.random() * 600));
     }
 
-    await new Promise(r => setTimeout(r, pollIntervalMs));
+    // Exponential backoff: increase poll interval gradually (cap at 1200ms)
+    currentPollInterval = Math.min(1200, currentPollInterval + 30);
+    await new Promise(r => setTimeout(r, currentPollInterval));
   }
 
   // 4. Final verification check upon timeout
@@ -336,3 +360,130 @@ export async function waitForCloudflareVerification(page, options = {}) {
   onThought?.(`⚠️ [Cloudflare Verification]: Wait reached ${totalSec}s. Proceeding with caution...`, 'recovery');
   return { detected: true, verified: false, timedOut: true, elapsedMs: Date.now() - startTime };
 }
+
+/**
+ * Intelligent multi-attempt Cloudflare bypass with session rotation.
+ * 
+ * Attempt 1: Patient wait with enhanced verification (current behavior, improved)
+ * Attempt 2: Soft refresh — navigate away, perform human activity, navigate back
+ * Attempt 3: Hard session reset — clear cookies/storage, regenerate canvas noise, retry
+ * 
+ * Between attempts: Generate random human-like activity to build activity reputation.
+ * 
+ * @param {import('playwright').Page} page
+ * @param {Object} options
+ * @param {string} options.targetUrl The URL being accessed (for navigation retry)
+ * @param {Object} [options.sessionManager] Session manager instance
+ * @param {Function} [options.onThought] ReAct thought callback
+ * @returns {Promise<{ verified: boolean, attempts: number, token?: string }>}
+ */
+export async function handleCloudflareBlockWithRetry(page, options = {}) {
+  const {
+    targetUrl = '',
+    sessionManager = null,
+    onThought = null,
+    maxAttempts = 3
+  } = options;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    onThought?.(
+      `🔄 [Cloudflare Bypass Attempt ${attempt}/${maxAttempts}]: Starting verification sequence...`,
+      'recovery'
+    );
+
+    // ─── Attempt the verification ───
+    const result = await waitForCloudflareVerification(page, {
+      maxWaitMs: attempt === 1 ? 45000 : 30000,
+      pollIntervalMs: 400,
+      sessionManager,
+      allowClick: true,
+      onThought
+    });
+
+    if (result.verified) {
+      onThought?.(
+        `✓ [Cloudflare Bypass]: Challenge solved on attempt ${attempt}! Token acquired.`,
+        'observation'
+      );
+      return { verified: true, attempts: attempt, token: result.token };
+    }
+
+    if (attempt >= maxAttempts) break;
+
+    // ─── Escalation strategies between attempts ───
+    if (attempt === 1) {
+      // Strategy: Soft Refresh — navigate away, do human things, come back
+      onThought?.('🔄 [Cloudflare Bypass]: Attempt 1 failed. Performing soft refresh with human activity warmup...', 'recovery');
+
+      // Navigate to a neutral page
+      try {
+        await page.goto('https://html.duckduckgo.com', { waitUntil: 'domcontentloaded', timeout: 10000 });
+      } catch {}
+
+      // Simulate natural human browsing (3-5s)
+      const warmupDuration = 3000 + Math.random() * 2000;
+      const warmupStart = Date.now();
+      while (Date.now() - warmupStart < warmupDuration) {
+        const rx = 100 + Math.random() * 800;
+        const ry = 100 + Math.random() * 500;
+        await page.mouse.move(rx, ry).catch(() => {});
+        await new Promise(r => setTimeout(r, 150 + Math.random() * 300));
+      }
+
+      // Navigate back to target
+      if (targetUrl) {
+        try {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch {}
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+    } else if (attempt === 2) {
+      // Strategy: Hard Session Reset — clear cookies/storage, then retry
+      onThought?.('🔄 [Cloudflare Bypass]: Attempt 2 failed. Performing hard session reset (clearing cookies & storage)...', 'recovery');
+
+      try {
+        // Clear cookies for the target domain
+        const context = page.context();
+        await context.clearCookies();
+
+        // Clear localStorage and sessionStorage
+        await page.evaluate(() => {
+          try { localStorage.clear(); } catch {}
+          try { sessionStorage.clear(); } catch {}
+        }).catch(() => {});
+
+      } catch (err) {
+        console.warn('[CF Retry] Cookie/storage clear failed:', err.message);
+      }
+
+      // Extended human warmup (5-7s)
+      const warmupDuration = 5000 + Math.random() * 2000;
+      const warmupStart = Date.now();
+      while (Date.now() - warmupStart < warmupDuration) {
+        const rx = 50 + Math.random() * 900;
+        const ry = 50 + Math.random() * 600;
+        await page.mouse.move(rx, ry).catch(() => {});
+        if (Math.random() < 0.3) {
+          await page.mouse.wheel(0, Math.random() < 0.5 ? 100 : -100).catch(() => {});
+        }
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+      }
+
+      // Navigate back
+      if (targetUrl) {
+        try {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch {}
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+  }
+
+  onThought?.(
+    `⚠️ [Cloudflare Bypass]: All ${maxAttempts} attempts exhausted. Cloudflare may require manual intervention or different network.`,
+    'recovery'
+  );
+  return { verified: false, attempts: maxAttempts };
+}
+

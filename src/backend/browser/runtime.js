@@ -1,58 +1,14 @@
 import fs from 'fs';
 import path from 'path';
+import { applyDeepStealth, getStealthLaunchArgs } from './stealth-profiles.js';
 
 /**
- * Injects modern stealth evasion scripts to mask automation and bypass bot detection
+ * Injects comprehensive stealth evasion scripts (30+ detection vector patches)
+ * to bypass Cloudflare Turnstile, reCAPTCHA, hCaptcha, and modern bot walls.
+ * Delegates to the deep stealth engine in stealth-profiles.js.
  */
 export async function applyStealthPatches(target) {
-  const initScript = `
-    // 1. Mask navigator.webdriver
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-    });
-
-    // 2. Emulate realistic plugins array
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-      ],
-    });
-
-    // 3. Emulate default modern languages
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en'],
-    });
-
-    // 4. Mock window.chrome object
-    if (!window.chrome) {
-      window.chrome = {
-        runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
-        app: {}
-      };
-    }
-
-    // 5. Emulate WebGL vendor & renderer
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(parameter) {
-      // UNMASKED_VENDOR_WEBGL
-      if (parameter === 37445) return 'Intel Inc.';
-      // UNMASKED_RENDERER_WEBGL
-      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-      return getParameter.apply(this, [parameter]);
-    };
-  `;
-
-  try {
-    if (typeof target.addInitScript === 'function') {
-      await target.addInitScript(initScript);
-    }
-  } catch (err) {
-    console.warn('[Stealth] Could not inject init script:', err.message);
-  }
+  await applyDeepStealth(target);
 }
 
 /**
@@ -215,10 +171,7 @@ export class LocalChromeRuntime extends BrowserRuntime {
       executablePath,
       headless,
       args: [
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
+        ...getStealthLaunchArgs(),
         '--disable-web-security',
         '--allow-running-insecure-content',
         ...baseArgs
@@ -268,10 +221,7 @@ export class ManagedChromiumRuntime extends BrowserRuntime {
     const options = {
       headless,
       args: [
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
+        ...getStealthLaunchArgs(),
         '--disable-gpu',
         '--disable-web-security',
         '--allow-running-insecure-content',

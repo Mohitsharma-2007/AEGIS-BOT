@@ -42,10 +42,21 @@ export class BrowserSessionManager {
 
       this.context = await this.browser.newContext({
         viewport: this.viewport,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 AegisBot/1.0',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
         locale: 'en-US',
         timezoneId: 'Asia/Kolkata',
-        deviceScaleFactor: 1
+        deviceScaleFactor: 1,
+        extraHTTPHeaders: {
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Sec-CH-UA': '"Chromium";v="133", "Not(A:Brand";v="24", "Google Chrome";v="133"',
+          'Sec-CH-UA-Mobile': '?0',
+          'Sec-CH-UA-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1'
+        }
       });
 
       // Inject modern anti-bot stealth scripts
@@ -103,6 +114,24 @@ export class BrowserSessionManager {
       await page.route('**/*', (route) => {
         const type = route.request().resourceType();
         const url = route.request().url().toLowerCase();
+        
+        // CRITICAL: Always allow Cloudflare, Turnstile, reCAPTCHA, and hCaptcha resources through!
+        // Blocking these causes silent verification failure.
+        const isChallengeResource = (
+          url.includes('challenges.cloudflare.com') ||
+          url.includes('cdn-cgi') ||
+          url.includes('turnstile') ||
+          url.includes('cf-turnstile') ||
+          url.includes('recaptcha') ||
+          url.includes('hcaptcha') ||
+          url.includes('cloudflare.com') ||
+          url.includes('cloudflareinsights') ||
+          url.includes('captcha')
+        );
+        if (isChallengeResource) {
+          return route.continue();
+        }
+
         if (this.turboMode && (type === 'image' || type === 'media' || type === 'font' || url.includes('analytics') || url.includes('doubleclick') || url.includes('telemetry'))) {
           return route.abort();
         }
