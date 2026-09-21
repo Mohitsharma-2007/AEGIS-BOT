@@ -128,7 +128,7 @@ export function adaptPlanOnDeviation(currentPlan, deviationReason, context = {})
         { id: 'sec-1', title: '✓ Security challenge barrier encountered', target: context.type || 'Cloudflare / reCAPTCHA', status: 'completed', isAdapted: true },
         { id: 'sec-2', title: 'Wait 2-3s for frame settling & auto-dismissal check', target: 'Settling Delay', status: 'executing', isAdapted: true },
         { id: 'sec-3', title: 'Approach challenge checkbox with curved human mouse physics', target: 'Cubic Bezier Click', status: 'pending', isAdapted: true },
-        { id: 'sec-4', title: 'Observe page reload & verify fresh DOM state', target: 'Post-Reload Observation', status: 'pending', isAdapted: true },
+        { id: 'sec-4', title: 'Patiently wait for Cloudflare verification spinner to complete', target: 'Spinner Polling & Token Verification', status: 'pending', isAdapted: true },
         { id: 'sec-5', title: 'Confirm verified destination and resume workflow', target: 'Action Confirmation', status: 'pending', isAdapted: true },
         ...steps.filter(s => s.status !== 'completed').map(s => ({ ...s, isAdapted: true }))
       ]

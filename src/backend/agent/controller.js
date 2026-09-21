@@ -284,6 +284,7 @@ Return STRICT JSON:
     return {
       taskType,
       isLogin: entities.isLogin,
+      shouldContinue: entities.shouldContinue,
       hasCredentials: entities.hasCredentials,
       credentials: entities.credentials || this.sessionCredentials,
       fields: { ...entities.fields, ...this.sessionFields },
@@ -516,6 +517,14 @@ Return STRICT JSON:
 
     // 5. Deep Check for Turnstile / reCAPTCHA iframe and stages
     const hasChallengeWidget = await activeTab.page.evaluate(() => {
+      // If token is already generated or verified, it's not a blocking challenge
+      const tokenInputs = Array.from(document.querySelectorAll(
+        'input[name="cf-turnstile-response"], input[name="cf_challenge_response"], input[name*="turnstile-response"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]'
+      ));
+      const hasSolvedToken = tokenInputs.some(i => i.value && i.value.trim().length > 20);
+      const hasSuccessIndicator = Boolean(document.querySelector('[data-state="success"], [data-state="solved"], .turnstile-success, #challenge-success'));
+      if (hasSolvedToken || hasSuccessIndicator) return false;
+
       const frame = document.querySelector(
         'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[title*="cloudflare"], iframe[title*="turnstile"], iframe[title*="widget containing a cloudflare security challenge"]'
       );
@@ -543,6 +552,7 @@ Return STRICT JSON:
       hasChallengeWidget ||
       visionAnalysis?.is_blocked ||
       visionAnalysis?.has_cloudflare ||
+      visionAnalysis?.is_spinning ||
       visionAnalysis?.blocker_type === 'cloudflare' ||
       visionAnalysis?.blocker_type === 'captcha' ||
       visionAnalysis?.page_type === 'bot_challenge'
@@ -557,17 +567,20 @@ Return STRICT JSON:
       globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
       this.broadcastState();
 
-      // Step A: Wait 2.5 seconds to observe if challenge clears automatically
-      this.emitThought(`Observing challenge frame for 2.5s for automatic resolution...`, 'recovery');
-      await new Promise(r => setTimeout(r, 2500));
+      // Step A: Engage patient Cloudflare spinner verification engine
+      this.emitThought(`Engaging patient Cloudflare verification engine (watching spinner & solving checkbox)...`, 'recovery');
+      const { waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
+      const solveRes = await waitForCloudflareVerification(activeTab.page, {
+        maxWaitMs: 25000,
+        pollIntervalMs: 600,
+        sessionManager: this.sessionManager,
+        allowClick: true,
+        onThought: (msg, type) => this.emitThought(msg, type)
+      });
 
       if (signal.aborted) return true;
 
-      // Step B: If still present, solve using human-like curved mouse clicks
-      this.emitThought(`Engaging curved Bezier human cursor interaction on challenge checkbox...`, 'action');
-      const solveRes = await globalToolRegistry.execute('browser.solve_challenge', {});
-
-      // Step C: Observe page reload & verify fresh DOM state
+      // Step B: Observe page reload & verify fresh DOM state
       this.emitThought(`Observing post-challenge page reload and capturing updated screenshot...`, 'observation');
       try {
         await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 });
@@ -748,17 +761,47 @@ Return STRICT JSON:
           await globalToolRegistry.execute('browser.click', { element_id: passwordField.element_id });
           await new Promise(r => setTimeout(r, 150));
           await globalToolRegistry.execute('browser.type', { text: creds.password });
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 400));
+
+          // =========================================================================
+          // PATIENT CLOUDFLARE TURNSTILE & VERIFICATION SPINNER GATE
+          // User: "The Bot does not have patience at all let the cloudflareverfy loading spins thecn click on login and continue to use"
+          // =========================================================================
+          const { inspectCloudflareVerification, waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
+          const turnstileState = await inspectCloudflareVerification(activeTab.page);
+
+          if (turnstileState.hasChallenge && !turnstileState.isVerified) {
+            this.emitThought(
+              `👁️ [Cloudflare Verification Gate]: Detected verification challenge on login form. Let the verification spinner spin until complete before clicking Log In...`,
+              'recovery'
+            );
+
+            await waitForCloudflareVerification(activeTab.page, {
+              maxWaitMs: 25000,
+              pollIntervalMs: 600,
+              sessionManager: this.sessionManager,
+              allowClick: true,
+              onThought: (msg, type) => this.emitThought(msg, type)
+            });
+
+            // Re-fetch fresh DOM extract after spinner completes so submit button coordinates are up-to-date
+            const refreshedDom = await this.sessionManager.getDomExtract({ maxElements: 100 });
+            if (refreshedDom && refreshedDom.length > 0) {
+              domElements.length = 0;
+              domElements.push(...refreshedDom);
+            }
+          }
 
           // Locate submit button
           const submitBtn = domElements.find(el => el.role === 'button' && /sign|log|submit|continue/i.test(el.text || el.value || el.aria_label));
           if (submitBtn) {
-            this.emitThought(`Submitting login credentials via button "${submitBtn.text || 'Submit'}"...`, 'action');
+            this.emitThought(`✓ Security verification confirmed. Submitting login credentials via button "${submitBtn.text || 'Submit'}"...`, 'action');
             if (submitBtn.center) {
               await globalToolRegistry.execute('browser.human_move_mouse', { x: submitBtn.center.x, y: submitBtn.center.y });
             }
             await globalToolRegistry.execute('browser.click', { element_id: submitBtn.element_id });
           } else {
+            this.emitThought(`✓ Security verification confirmed. Submitting login via Enter key...`, 'action');
             await globalToolRegistry.execute('browser.press', { key: 'Enter' });
           }
 
@@ -768,8 +811,33 @@ Return STRICT JSON:
             await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
           }
           await new Promise(r => setTimeout(r, 2000));
-          isTaskComplete = true;
-          continue;
+
+          // Capture post-login screenshot for user screencast
+          const postLoginScreenshot = await this.sessionManager.getScreenshot(false).catch(() => null);
+          if (postLoginScreenshot) {
+            globalEventBus.emit('screencast.frame', { frame: postLoginScreenshot });
+          }
+
+          // Check if session is authenticated (e.g. password field no longer on screen)
+          const isStillOnLogin = await activeTab.page.evaluate(() => {
+            return Boolean(document.querySelector('input[type="password"]'));
+          }).catch(() => false);
+
+          if (!isStillOnLogin) {
+            this.emitThought(`✓ Login successful! Authenticated session verified.`, 'observation');
+          }
+
+          // Determine if user requested to continue using the site
+          const shouldContinueUsing = intent.shouldContinue || (intent.cleanQuery && !['login', 'and', ''].includes(intent.cleanQuery.toLowerCase()));
+
+          if (shouldContinueUsing) {
+            this.emitThought(`Continuing to use the site as requested by task instructions...`, 'reasoning');
+            continue; // Keep the agent running in the active session!
+          } else {
+            this.emitThought(`Login completed successfully and session confirmed. Ready for next instructions.`, 'reasoning');
+            isTaskComplete = true;
+            continue;
+          }
         }
       }
 

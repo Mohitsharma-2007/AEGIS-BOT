@@ -501,7 +501,7 @@ export function registerBrowserTools(sessionManager) {
   // 33. browser.solve_challenge
   globalToolRegistry.register({
     name: 'browser.solve_challenge',
-    description: 'Detects and solves Cloudflare Turnstile, reCAPTCHA, and bot verification challenges using human curved mouse trajectory interaction.',
+    description: 'Detects and solves Cloudflare Turnstile, reCAPTCHA, and bot verification challenges using patient spinner observation and human curved mouse interaction.',
     inputSchema: { max_wait_ms: 'number' },
     permissions: ['interact', 'stealth'],
     category: 'Stealth & Anti-Bot Defense',
@@ -510,62 +510,58 @@ export function registerBrowserTools(sessionManager) {
       if (!page) throw new Error('No active page');
 
       const { globalEventBus } = await import('../events/event-bus.js');
+      const { waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
+
       globalEventBus.emitEvent('challenge.detected', { type: 'Turnstile/reCAPTCHA' });
 
-      // 1. Wait a few seconds for challenge frame to settle and evaluate if auto-dismissing
-      await new Promise(r => setTimeout(r, 2200));
-
-      // 2. Check if already bypassed automatically
-      const { detectBotWall } = await import('../browser/runtime.js');
-      const initialWall = await detectBotWall(page);
-      if (!initialWall.isBlocked) {
-        return { success: true, method: 'auto_dismiss', message: 'Challenge cleared automatically.' };
-      }
-
-      // 3. Locate Turnstile / reCAPTCHA iframe or checkbox
-      const checkboxBox = await page.evaluate(() => {
-        const turnstileFrame = document.querySelector('iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"]');
-        if (turnstileFrame) {
-          const rect = turnstileFrame.getBoundingClientRect();
-          return {
-            x: Math.round(rect.left + Math.min(35, rect.width * 0.15)),
-            y: Math.round(rect.top + rect.height / 2),
-            width: rect.width,
-            height: rect.height
-          };
+      const result = await waitForCloudflareVerification(page, {
+        maxWaitMs: input.max_wait_ms || 25000,
+        pollIntervalMs: 600,
+        sessionManager,
+        allowClick: true,
+        onThought: (msg, type) => {
+          globalEventBus.emitEvent('agent.thought', { text: msg, type: type || 'recovery' });
         }
-        const cfBox = document.querySelector('#cf-stage input[type="checkbox"], .cf-turnstile, #challenge-stage');
-        if (cfBox) {
-          const rect = cfBox.getBoundingClientRect();
-          return {
-            x: Math.round(rect.left + rect.width / 2),
-            y: Math.round(rect.top + rect.height / 2),
-            width: rect.width,
-            height: rect.height
-          };
-        }
-        return null;
       });
 
-      if (checkboxBox) {
-        // Add human slight randomized offset (+- 3px) so clicks aren't machine-centered
-        const clickX = checkboxBox.x + Math.floor((Math.random() - 0.5) * 6);
-        const clickY = checkboxBox.y + Math.floor((Math.random() - 0.5) * 6);
+      return {
+        success: result.verified,
+        token: result.token || null,
+        method: 'human_curved_bezier_patient_wait',
+        message: result.verified ? 'Cloudflare verification completed successfully' : 'Challenge in progress or timeout reached'
+      };
+    }
+  });
 
-        // Curved human mouse approach and click
-        await sessionManager.click(clickX, clickY);
+  // 34. browser.wait_for_challenge_spinner
+  globalToolRegistry.register({
+    name: 'browser.wait_for_challenge_spinner',
+    description: 'Patiently waits for the Cloudflare verification spinner to finish spinning and generate a valid response token.',
+    inputSchema: { max_wait_ms: 'number' },
+    permissions: ['read', 'interact'],
+    category: 'Stealth & Anti-Bot Defense',
+    async execute(input) {
+      const page = sessionManager.getActivePage();
+      if (!page) throw new Error('No active page');
 
-        // Wait for token resolution
-        await new Promise(r => setTimeout(r, 3500));
-        const postWall = await detectBotWall(page);
-        return {
-          success: !postWall.isBlocked,
-          method: 'human_curved_click',
-          message: postWall.isBlocked ? 'Challenge clicked, awaiting verification' : 'Challenge solved successfully'
-        };
-      }
+      const { globalEventBus } = await import('../events/event-bus.js');
+      const { waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
 
-      return { success: false, reason: 'Checkbox element not directly accessible via viewport' };
+      const result = await waitForCloudflareVerification(page, {
+        maxWaitMs: input.max_wait_ms || 25000,
+        pollIntervalMs: 600,
+        sessionManager,
+        allowClick: true,
+        onThought: (msg, type) => {
+          globalEventBus.emitEvent('agent.thought', { text: msg, type: type || 'recovery' });
+        }
+      });
+
+      return {
+        success: result.verified,
+        token: result.token || null,
+        message: result.verified ? 'Spinner finished. Token acquired.' : 'Verification wait timed out'
+      };
     }
   });
 

@@ -27,6 +27,7 @@ export function extractTaskEntities(taskDescription) {
   // 1. Detect Intent Category
   const isLogin = /\b(login|log\s*in|sign\s*in|signin|authenticate|auth)\b/i.test(raw);
   const isFormFilling = /\b(fill|form|register|signup|sign\s*up|apply|submit)\b/i.test(raw);
+  const shouldContinue = /\b(continue\s+(?:to\s+use|using)|keep\s+(?:using|going)|browse|explore|search|find|view|open)\b/i.test(raw);
 
   const fields = {};
   let username = null;
@@ -117,6 +118,12 @@ export function extractTaskEntities(taskDescription) {
     .replace(/\bsearch\s+(?:github|amazon|google|for)?\s*/gi, '')
     .replace(/\band\s+find\s+the\s+one\s+with.*/gi, '')
     .replace(/\band\s+create\s+a\s+note.*/gi, '')
+    .replace(/let\s+the\s+cloudflare[^\s]*\s+loading\s+spins?/gi, '')
+    .replace(/let\s+(?:the\s+)?(?:cloudflare|spinner|verification).*/gi, '')
+    .replace(/thecn\s+click\s+on\s+login.*/gi, '')
+    .replace(/then\s+click\s+on\s+login.*/gi, '')
+    .replace(/\band\s+continue\s+to\s+use\b.*/gi, '')
+    .replace(/\bso\s+please\s+fix\s+these\s+issues\b/gi, '')
     .replace(/\bunderscore\b/gi, '')
     .replace(/['":,;]/g, ' ')
     .trim();
@@ -131,6 +138,7 @@ export function extractTaskEntities(taskDescription) {
   return {
     isLogin,
     isFormFilling,
+    shouldContinue,
     hasCredentials,
     credentials: (username || password) ? { username, password } : null,
     fields,

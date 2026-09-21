@@ -71,22 +71,31 @@ export async function detectBotWall(page) {
         return { isBlocked: true, keyword: 'network_reset_or_datacenter_block', title: 'Network Blocked' };
       }
 
-      // 1. Direct Cloudflare Turnstile / reCAPTCHA / hCaptcha iframe check
-      const challengeIframe = document.querySelector(
-        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="cf-turnstile"], iframe[title*="cloudflare"], iframe[title*="turnstile"], iframe[title*="widget containing a cloudflare security challenge"]'
-      );
-      if (challengeIframe) {
-        return { isBlocked: true, keyword: 'cloudflare_turnstile_iframe', title: document.title };
-      }
+      // Check if turnstile / captcha is already verified and solved
+      const tokenInputs = Array.from(document.querySelectorAll(
+        'input[name="cf-turnstile-response"], input[name="cf_challenge_response"], input[name*="turnstile-response"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]'
+      ));
+      const hasSolvedToken = tokenInputs.some(i => i.value && i.value.trim().length > 20);
+      const hasSuccessIndicator = Boolean(document.querySelector('[data-state="success"], [data-state="solved"], .turnstile-success, #challenge-success'));
 
-      // 2. Cloudflare Challenge Stages & Containers
-      const challengeStage = document.querySelector(
-        '#challenge-stage, #cf-stage, .cf-turnstile, #turnstile-wrapper, #challenge-running, #cf-challenge-running, #cf-wrapper, #challenge-form'
-      );
-      if (challengeStage) {
-        const rect = challengeStage.getBoundingClientRect();
-        if (rect.width > 10 && rect.height > 10) {
-          return { isBlocked: true, keyword: 'cloudflare_turnstile_stage', title: document.title };
+      // 1. Direct Cloudflare Turnstile / reCAPTCHA / hCaptcha iframe check
+      if (!hasSolvedToken && !hasSuccessIndicator) {
+        const challengeIframe = document.querySelector(
+          'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="cf-turnstile"], iframe[title*="cloudflare"], iframe[title*="turnstile"], iframe[title*="widget containing a cloudflare security challenge"]'
+        );
+        if (challengeIframe) {
+          return { isBlocked: true, keyword: 'cloudflare_turnstile_iframe', title: document.title };
+        }
+
+        // 2. Cloudflare Challenge Stages & Containers
+        const challengeStage = document.querySelector(
+          '#challenge-stage, #cf-stage, .cf-turnstile, #turnstile-wrapper, #challenge-running, #cf-challenge-running, #cf-wrapper, #challenge-form'
+        );
+        if (challengeStage) {
+          const rect = challengeStage.getBoundingClientRect();
+          if (rect.width > 10 && rect.height > 10) {
+            return { isBlocked: true, keyword: 'cloudflare_turnstile_stage', title: document.title };
+          }
         }
       }
 

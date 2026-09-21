@@ -27,15 +27,16 @@ export class VisionAssistant {
 
     const systemPrompt = `You are the AEGIS Vision Assistant sidecar.
 Analyze the provided browser canvas screenshot alongside the user's goal: "${userGoal}".
-CRITICAL: Carefully check if the page shows a Cloudflare challenge ("Just a moment...", Turnstile checkbox, "Verify you are human", Cloudflare logo, or ray ID), Google reCAPTCHA, or bot challenge.
+CRITICAL: Carefully check if the page shows a Cloudflare challenge ("Just a moment...", Turnstile checkbox, "Verify you are human", Cloudflare logo, or ray ID), Google reCAPTCHA, or bot challenge. Also check if a verification loading spinner is actively spinning.
 Return a concise JSON response with:
 {
   "is_blocked": boolean, // true if Cloudflare Turnstile, Cloudflare "Just a moment", CAPTCHA, bot barrier, or security check is visible
   "has_cloudflare": boolean, // true if Cloudflare Turnstile, checkbox, or "Just a moment" screen is visible
+  "is_spinning": boolean, // true if Cloudflare verification spinner or loading circle is actively spinning
   "blocker_type": "none" | "cloudflare" | "captcha" | "unusual_traffic" | "cookie_wall",
   "page_type": "bot_challenge" | "login_page" | "search_results" | "product_page" | "article" | "home_page",
   "key_findings": ["brief description of 2-3 main visual elements found"],
-  "recommended_action": "e.g. 'wait and solve cloudflare turnstile checkbox', 'fill login credentials', 'extract results'"
+  "recommended_action": "e.g. 'wait patiently for cloudflare verification spinner to finish', 'wait and solve cloudflare turnstile checkbox', 'fill login credentials', 'extract results'"
 }
 Respond with raw JSON only.`;
 
