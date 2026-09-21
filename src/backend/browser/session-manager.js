@@ -452,7 +452,16 @@ export class BrowserSessionManager {
 
     const elementId = options.element_id;
     if (elementId) {
-      await this.clickElement(elementId);
+      await this.clickElement(elementId).catch(() => {});
+      // Ensure element has DOM focus and previous value is cleared/selected
+      await page.evaluate((id) => {
+        const el = document.querySelector(`[data-aegis-id="${id}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.focus();
+          if (typeof el.select === 'function') el.select();
+        }
+      }, elementId).catch(() => {});
     }
 
     globalEventBus.emitEvent('keyboard.type_started', {
@@ -460,7 +469,23 @@ export class BrowserSessionManager {
       element_id: elementId
     });
 
-    await page.keyboard.type(text, { delay: options.delay || 45 });
+    await page.keyboard.type(text, { delay: options.delay || 30 });
+
+    // Fallback & validation: If element is an input/textarea and text wasn't registered, set value directly
+    if (elementId) {
+      await page.evaluate(({ id, val }) => {
+        const el = document.querySelector(`[data-aegis-id="${id}"]`);
+        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+          if (!el.value || el.value !== val) {
+            el.focus();
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }
+        }
+      }, { id: elementId, val: text }).catch(() => {});
+    }
 
     globalEventBus.emitEvent('keyboard.type_completed', {
       text: text.slice(0, 30),

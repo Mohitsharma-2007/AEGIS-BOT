@@ -19,7 +19,7 @@ export async function inspectCloudflareVerification(page) {
   if (!page) return { hasChallenge: false, isVerified: false, isSpinning: false, needsClick: false };
 
   try {
-    return await page.evaluate(() => {
+    const topState = await page.evaluate(() => {
       const url = window.location.href || '';
       const title = (document.title || '').toLowerCase();
       const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
@@ -124,6 +124,74 @@ export async function inspectCloudflareVerification(page) {
         isInterstitial
       };
     });
+
+    // 8. Cross-Frame Deep Inspection for Turnstile / Challenges
+    let frameSpinning = false;
+    let frameVerified = false;
+    let frameClickCoords = null;
+
+    const frames = typeof page.frames === 'function' ? page.frames() : [];
+    for (const frame of frames) {
+      const fUrl = frame.url() || '';
+      if (/challenges\.cloudflare\.com|turnstile|recaptcha/i.test(fUrl)) {
+        try {
+          const fState = await frame.evaluate(() => {
+            const bText = (document.body ? document.body.innerText : '').toLowerCase();
+            const spinning = (
+              bText.includes('verifying') ||
+              bText.includes('checking') ||
+              Boolean(document.querySelector('.cf-spinner, .turnstile-spinner, [role="progressbar"], [aria-busy="true"], svg circle[stroke-dasharray]'))
+            );
+            const verified = (
+              bText.includes('success') ||
+              Boolean(document.querySelector('[data-state="success"], [data-state="solved"], svg[aria-label="Success"], svg.checkmark, .success'))
+            );
+            const checkbox = document.querySelector('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage, .mark');
+            let coords = null;
+            if (checkbox) {
+              const r = checkbox.getBoundingClientRect();
+              if (r.width > 5 && r.height > 5) {
+                coords = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+              }
+            }
+            return { spinning, verified, hasCheckbox: Boolean(checkbox), coords };
+          }).catch(() => null);
+
+          if (fState) {
+            if (fState.spinning) frameSpinning = true;
+            if (fState.verified) frameVerified = true;
+            if (fState.hasCheckbox && !fState.spinning && !fState.verified && fState.coords) {
+              const frameEl = await frame.frameElement().catch(() => null);
+              if (frameEl) {
+                const fBox = await frameEl.boundingBox().catch(() => null);
+                if (fBox) {
+                  frameClickCoords = {
+                    x: Math.round(fBox.x + fState.coords.x),
+                    y: Math.round(fBox.y + fState.coords.y)
+                  };
+                }
+              }
+            }
+          }
+        } catch (e) {}
+      }
+    }
+
+    const isVerified = Boolean(topState.isVerified || frameVerified);
+    const isSpinning = Boolean((topState.isSpinning || frameSpinning) && !isVerified);
+    const hasChallenge = Boolean(topState.hasChallenge || frames.some(f => /challenges\.cloudflare|turnstile/i.test(f.url())) || isSpinning);
+    const needsClick = Boolean((topState.needsClick || frameClickCoords) && !isVerified && !isSpinning);
+    const clickTarget = frameClickCoords || topState.clickTarget;
+
+    return {
+      hasChallenge,
+      isVerified,
+      isSpinning,
+      needsClick,
+      token: topState.token,
+      clickTarget,
+      isInterstitial: topState.isInterstitial
+    };
   } catch (err) {
     console.warn('[inspectCloudflareVerification error]:', err.message);
     return { hasChallenge: false, isVerified: false, isSpinning: false, needsClick: false };

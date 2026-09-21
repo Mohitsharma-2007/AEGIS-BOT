@@ -749,8 +749,8 @@ Return STRICT JSON:
           }
           await globalToolRegistry.execute('browser.click', { element_id: usernameField.element_id });
           await new Promise(r => setTimeout(r, 150));
-          await globalToolRegistry.execute('browser.type', { text: creds.username });
-          await new Promise(r => setTimeout(r, 250));
+          await globalToolRegistry.execute('browser.type', { element_id: usernameField.element_id, text: creds.username });
+          await new Promise(r => setTimeout(r, 200));
         }
 
         if (creds && passwordField) {
@@ -760,86 +760,178 @@ Return STRICT JSON:
           }
           await globalToolRegistry.execute('browser.click', { element_id: passwordField.element_id });
           await new Promise(r => setTimeout(r, 150));
-          await globalToolRegistry.execute('browser.type', { text: creds.password });
-          await new Promise(r => setTimeout(r, 400));
+          await globalToolRegistry.execute('browser.type', { element_id: passwordField.element_id, text: creds.password });
+          await new Promise(r => setTimeout(r, 250));
+        }
 
-          // =========================================================================
-          // PATIENT CLOUDFLARE TURNSTILE & VERIFICATION SPINNER GATE
-          // User: "The Bot does not have patience at all let the cloudflareverfy loading spins thecn click on login and continue to use"
-          // =========================================================================
-          const { inspectCloudflareVerification, waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
-          const turnstileState = await inspectCloudflareVerification(activeTab.page);
+        // =========================================================================
+        // STRICT DOM CREDENTIAL VERIFICATION GATE
+        // Verify both username and password values exist in DOM before proceeding.
+        // If the custom framework swallowed typing, force-inject and fire reactive events!
+        // =========================================================================
+        if (creds) {
+          const domFillCheck = await activeTab.page.evaluate(({ u, p }) => {
+            const uInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="password"])'))
+              .filter(el => /user|_username|email|login|account|enrollment/i.test(el.name || el.id || el.placeholder || ''));
+            const pInputs = Array.from(document.querySelectorAll('input[type="password"]'));
 
-          if (turnstileState.hasChallenge && !turnstileState.isVerified) {
-            this.emitThought(
-              `👁️ [Cloudflare Verification Gate]: Detected verification challenge on login form. Let the verification spinner spin until complete before clicking Log In...`,
-              'recovery'
-            );
+            const uEl = uInputs.find(el => el.offsetParent !== null) || uInputs[0];
+            const pEl = pInputs.find(el => el.offsetParent !== null) || pInputs[0];
 
-            await waitForCloudflareVerification(activeTab.page, {
-              maxWaitMs: 25000,
-              pollIntervalMs: 600,
-              sessionManager: this.sessionManager,
-              allowClick: true,
-              onThought: (msg, type) => this.emitThought(msg, type)
-            });
-
-            // Re-fetch fresh DOM extract after spinner completes so submit button coordinates are up-to-date
-            const refreshedDom = await this.sessionManager.getDomExtract({ maxElements: 100 });
-            if (refreshedDom && refreshedDom.length > 0) {
-              domElements.length = 0;
-              domElements.push(...refreshedDom);
+            if (uEl && (!uEl.value || uEl.value !== u)) {
+              uEl.focus();
+              uEl.value = u;
+              uEl.dispatchEvent(new Event('input', { bubbles: true }));
+              uEl.dispatchEvent(new Event('change', { bubbles: true }));
+              uEl.dispatchEvent(new Event('blur', { bubbles: true }));
             }
-          }
 
-          // Locate submit button
-          const submitBtn = domElements.find(el => el.role === 'button' && /sign|log|submit|continue/i.test(el.text || el.value || el.aria_label));
-          if (submitBtn) {
-            this.emitThought(`✓ Security verification confirmed. Submitting login credentials via button "${submitBtn.text || 'Submit'}"...`, 'action');
-            if (submitBtn.center) {
-              await globalToolRegistry.execute('browser.human_move_mouse', { x: submitBtn.center.x, y: submitBtn.center.y });
+            if (pEl && (!pEl.value || pEl.value !== p)) {
+              pEl.focus();
+              pEl.value = p;
+              pEl.dispatchEvent(new Event('input', { bubbles: true }));
+              pEl.dispatchEvent(new Event('change', { bubbles: true }));
+              pEl.dispatchEvent(new Event('blur', { bubbles: true }));
             }
-            await globalToolRegistry.execute('browser.click', { element_id: submitBtn.element_id });
-          } else {
-            this.emitThought(`✓ Security verification confirmed. Submitting login via Enter key...`, 'action');
-            await globalToolRegistry.execute('browser.press', { key: 'Enter' });
-          }
 
-          // Observe post-login reload and verify state
-          this.emitThought(`Observing post-login page state and verifying authenticated session...`, 'observation');
-          if (activeTab.page) {
-            await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
-          }
-          await new Promise(r => setTimeout(r, 2000));
+            return {
+              userVal: uEl ? uEl.value : null,
+              passLen: pEl && pEl.value ? pEl.value.length : 0
+            };
+          }, { u: creds.username, p: creds.password }).catch(() => ({ userVal: null, passLen: 0 }));
 
-          // Capture post-login screenshot for user screencast
-          const postLoginScreenshot = await this.sessionManager.getScreenshot(false).catch(() => null);
-          if (postLoginScreenshot) {
-            globalEventBus.emit('screencast.frame', { frame: postLoginScreenshot });
-          }
+          this.emitThought(
+            `✓ Form credential validation confirmed in DOM (User: "${domFillCheck.userVal || '✓'}", Password: ${domFillCheck.passLen > 0 ? '••••••••' : 'empty'}).`,
+            'observation'
+          );
+        }
 
-          // Check if session is authenticated (e.g. password field no longer on screen)
-          const isStillOnLogin = await activeTab.page.evaluate(() => {
-            return Boolean(document.querySelector('input[type="password"]'));
-          }).catch(() => false);
+        // =========================================================================
+        // PATIENT CLOUDFLARE TURNSTILE & VERIFICATION SPINNER GATE
+        // User: "The Bot does not have patience at all let the cloudflareverfy loading spins thecn click on login and continue to use"
+        // =========================================================================
+        // Ensure user active activity flag is triggered on page
+        await activeTab.page.evaluate(() => {
+          window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 250, clientY: 250 }));
+          if (typeof userActive !== 'undefined') userActive = true;
+        }).catch(() => {});
 
-          if (!isStillOnLogin) {
-            this.emitThought(`✓ Login successful! Authenticated session verified.`, 'observation');
-          }
+        const { inspectCloudflareVerification, waitForCloudflareVerification } = await import('../browser/cloudflare-verifier.js');
+        let turnstileState = await inspectCloudflareVerification(activeTab.page);
 
-          // Determine if user requested to continue using the site
-          const shouldContinueUsing = intent.shouldContinue || (intent.cleanQuery && !['login', 'and', ''].includes(intent.cleanQuery.toLowerCase()));
+        if (turnstileState.hasChallenge && !turnstileState.isVerified) {
+          this.emitThought(
+            `👁️ [Cloudflare Verification Gate]: Detected verification challenge on login form. Let the verification spinner spin until complete before clicking Log In...`,
+            'recovery'
+          );
 
-          if (shouldContinueUsing) {
-            this.emitThought(`Continuing to use the site as requested by task instructions...`, 'reasoning');
-            continue; // Keep the agent running in the active session!
-          } else {
-            this.emitThought(`Login completed successfully and session confirmed. Ready for next instructions.`, 'reasoning');
-            isTaskComplete = true;
-            continue;
+          await waitForCloudflareVerification(activeTab.page, {
+            maxWaitMs: 30000,
+            pollIntervalMs: 600,
+            sessionManager: this.sessionManager,
+            allowClick: true,
+            onThought: (msg, type) => this.emitThought(msg, type)
+          });
+
+          // Re-inspect state
+          turnstileState = await inspectCloudflareVerification(activeTab.page);
+
+          // Re-fetch fresh DOM extract after spinner completes so submit button coordinates are up-to-date
+          const refreshedDom = await this.sessionManager.getDomExtract({ maxElements: 100 });
+          if (refreshedDom && refreshedDom.length > 0) {
+            domElements.length = 0;
+            domElements.push(...refreshedDom);
           }
         }
+
+        // Check if token verification is still pending on form (e.g. Amizone RecaptchaToken or cf-turnstile-response)
+        const tokenGate = await activeTab.page.evaluate(() => {
+          const hasCaptchaContainer = Boolean(document.querySelector('#Capthcadiv, .cf-turnstile, #challenge-stage'));
+          const cfResp = document.querySelector('input[name="cf-turnstile-response"]')?.value;
+          const rcResp = document.getElementById('RecaptchaToken')?.value;
+          const hasTokens = Boolean((cfResp && cfResp.length > 20) || (rcResp && rcResp.length > 20));
+          return { hasCaptchaContainer, hasTokens };
+        }).catch(() => ({ hasCaptchaContainer: false, hasTokens: true }));
+
+        if (tokenGate.hasCaptchaContainer && !tokenGate.hasTokens) {
+          this.emitThought(
+            `⏳ [Cloudflare Patience Gate]: Verification token callback still in flight. Waiting patiently for token generation...`,
+            'recovery'
+          );
+          for (let pWait = 0; pWait < 12; pWait++) {
+            await new Promise(r => setTimeout(r, 1000));
+            const ready = await activeTab.page.evaluate(() => {
+              const cf = document.querySelector('input[name="cf-turnstile-response"]')?.value;
+              const rc = document.getElementById('RecaptchaToken')?.value;
+              return Boolean((cf && cf.length > 20) || (rc && rc.length > 20));
+            }).catch(() => false);
+            if (ready) {
+              this.emitThought(`✓ Security verification confirmed. Response token ready.`, 'observation');
+              break;
+            }
+          }
+        }
+
+        // Locate submit button
+        const submitBtn = domElements.find(el => el.role === 'button' && /sign|log|submit|continue/i.test(el.text || el.value || el.aria_label));
+        if (submitBtn) {
+          this.emitThought(`Submitting login credentials via button "${submitBtn.text || 'Submit'}"...`, 'action');
+          if (submitBtn.center) {
+            await globalToolRegistry.execute('browser.human_move_mouse', { x: submitBtn.center.x, y: submitBtn.center.y });
+          }
+          await globalToolRegistry.execute('browser.click', { element_id: submitBtn.element_id });
+        } else {
+          this.emitThought(`Submitting login via Enter key...`, 'action');
+          await globalToolRegistry.execute('browser.press', { key: 'Enter' });
+        }
+
+        // Observe post-login reload and verify state
+        this.emitThought(`Observing post-login page state and verifying authenticated session...`, 'observation');
+        if (activeTab.page) {
+          await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+        }
+        await new Promise(r => setTimeout(r, 2500));
+
+        // Capture post-login screenshot for user screencast
+        const postLoginScreenshot = await this.sessionManager.getScreenshot(false).catch(() => null);
+        if (postLoginScreenshot) {
+          globalEventBus.emit('screencast.frame', { frame: postLoginScreenshot });
+        }
+
+        // Rigorous check if session is authenticated
+        const authVerdict = await activeTab.page.evaluate(() => {
+          const passInput = document.querySelector('input[type="password"]');
+          const isStillOnLogin = Boolean(passInput && passInput.offsetParent !== null);
+          const errorMsgEl = document.querySelector('.text-danger, .validation-summary-errors, .alert-danger, #lblMessage, [class*="error" i]');
+          const errorText = errorMsgEl ? (errorMsgEl.innerText || '').trim().slice(0, 120) : '';
+          return { isStillOnLogin, errorText };
+        }).catch(() => ({ isStillOnLogin: false, errorText: '' }));
+
+        // CRITICAL BUG FIX: If still on login screen, NEVER falsely report task complete!
+        if (authVerdict.isStillOnLogin) {
+          this.emitThought(
+            `⚠️ [Login Incomplete]: Still on login screen. Password field is still detected. ${authVerdict.errorText ? `Notice: "${authVerdict.errorText}". ` : ''}Retrying verification in next step...`,
+            'recovery'
+          );
+          // Do NOT mark isTaskComplete! Allow the loop to continue and retry or resolve
+          continue;
+        }
+
+        this.emitThought(`✓ Login successful! Authenticated session verified on ${activeTab.url}.`, 'observation');
+
+        // Determine if user requested to continue using the site
+        const shouldContinueUsing = intent.shouldContinue || (intent.cleanQuery && !['login', 'and', ''].includes(intent.cleanQuery.toLowerCase()));
+
+        if (shouldContinueUsing) {
+          this.emitThought(`Authenticated session confirmed. Continuing to use the site as requested by task instructions...`, 'reasoning');
+          continue; // Keep the agent running in the active session!
+        } else {
+          this.emitThought(`Login completed successfully and session confirmed. Ready for next instructions.`, 'reasoning');
+          isTaskComplete = true;
+          continue;
+        }
       }
+    }
 
       // =========================================================================
       // 5. JEV Element Selection & General Form Handling
@@ -968,7 +1060,7 @@ Return STRICT JSON:
         verified: true
       });
 
-      if (actionType === 'type' || stepCount >= 3) {
+      if (!intent.isLogin && (actionType === 'type' || stepCount >= 3)) {
         await new Promise(r => setTimeout(r, 1000));
         isTaskComplete = true;
       }
@@ -976,24 +1068,42 @@ Return STRICT JSON:
 
     if (signal.aborted || this.status === 'stopped') return;
 
-    if (this.plan && this.plan.steps) {
-      for (const s of this.plan.steps) {
-        s.status = 'completed';
+    // Verify if task truly completed or failed (prevent false completion for login flows)
+    const activeTab = this.sessionManager.getActiveTab();
+    const finalLoginStillPending = intent.isLogin && activeTab?.page ? await activeTab.page.evaluate(() => {
+      const pass = document.querySelector('input[type="password"]');
+      return Boolean(pass && pass.offsetParent !== null);
+    }).catch(() => false) : false;
+
+    if (finalLoginStillPending) {
+      this.status = 'failed';
+      this.currentAction = {
+        name: 'Login Incomplete',
+        target: 'Authentication pending - login screen still present',
+        method: 'Verification gate',
+        status: 'failed'
+      };
+      this.emitThought(`⚠️ Task finished: Login form is still active on screen. Please verify credentials or complete security verification.`, 'recovery');
+    } else {
+      if (this.plan && this.plan.steps) {
+        for (const s of this.plan.steps) {
+          s.status = 'completed';
+        }
       }
+
+      this.status = 'completed';
+      this.currentAction = {
+        name: 'Task Complete',
+        target: 'Execution finished successfully',
+        method: 'All milestone steps verified',
+        status: 'completed'
+      };
+
+      globalEventBus.emitEvent('agent.task_completed', {
+        task: this.currentTask,
+        steps_executed: stepCount
+      });
     }
-
-    this.status = 'completed';
-    this.currentAction = {
-      name: 'Task Complete',
-      target: 'Execution finished successfully',
-      method: 'All milestone steps verified',
-      status: 'completed'
-    };
-
-    globalEventBus.emitEvent('agent.task_completed', {
-      task: this.currentTask,
-      steps_executed: stepCount
-    });
 
     this.broadcastState();
   }
