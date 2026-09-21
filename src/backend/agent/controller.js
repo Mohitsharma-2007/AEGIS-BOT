@@ -931,7 +931,6 @@ Return STRICT JSON:
           continue;
         }
       }
-    }
 
       // =========================================================================
       // 5. JEV Element Selection & General Form Handling
