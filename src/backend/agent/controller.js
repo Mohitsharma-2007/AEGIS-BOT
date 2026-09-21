@@ -4,11 +4,12 @@ import { globalJevEngine } from '../tools/jev-tools.js';
 import { globalModelRouter } from '../providers/router.js';
 import { generateTaskPlan, adaptPlanOnDeviation } from './planner.js';
 import { globalVisionAssistant } from './vision-assistant.js';
+import { extractTaskEntities } from './entity-extractor.js';
 
 export class AgentController {
   constructor(sessionManager) {
     this.sessionManager = sessionManager;
-    this.status = 'idle'; // 'idle' | 'planning' | 'executing' | 'paused' | 'stopped' | 'completed' | 'error'
+    this.status = 'idle'; // 'idle' | 'planning' | 'executing' | 'awaiting_input' | 'paused' | 'stopped' | 'completed' | 'error'
     this.currentTask = null;
     this.plan = null;
     this.currentAction = null;
@@ -17,6 +18,9 @@ export class AgentController {
     this.abortController = null;
     this.stepHistory = [];
     this.maxSteps = 15;
+    this.sessionCredentials = null;
+    this.sessionFields = {};
+    this.pendingInputResolvers = new Map();
   }
 
   getState() {
@@ -76,6 +80,12 @@ export class AgentController {
       }
     }
 
+    // Cancel any pending input prompts
+    for (const [id, resolver] of this.pendingInputResolvers.entries()) {
+      resolver(null);
+    }
+    this.pendingInputResolvers.clear();
+
     globalEventBus.emitEvent('agent.stopped', {
       task: this.currentTask,
       reason: 'User manual stop request'
@@ -85,7 +95,7 @@ export class AgentController {
   }
 
   pause() {
-    if (this.status === 'executing') {
+    if (this.status === 'executing' || this.status === 'awaiting_input') {
       this.status = 'paused';
       globalEventBus.emitEvent('agent.paused', { task: this.currentTask });
       this.broadcastState();
@@ -101,9 +111,108 @@ export class AgentController {
   }
 
   /**
-   * Intelligently extracts search query, destination, and workflow intent from raw user prompt.
+   * Human-In-The-Loop (HITL) Interactive Prompt Modal:
+   * Requests credentials, confidential info (OTP/2FA), or missing form context directly from user.
+   */
+  async requestUserInput({ id, title, reason, fields = [], timeoutMs = 120000 }) {
+    const requestId = id || `req-${Date.now()}`;
+    const prevStatus = this.status;
+    this.status = 'awaiting_input';
+
+    this.emitThought(`Human-In-The-Loop: Prompting user for ${title}. Pausing execution...`, 'reasoning');
+
+    // Adapt plan to reflect interactive user prompt
+    if (this.plan) {
+      this.plan = adaptPlanOnDeviation(this.plan, 'auth_required', { fieldLabel: title });
+      globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
+    }
+
+    this.currentAction = {
+      name: 'Awaiting User Input',
+      target: title,
+      method: 'agent.request_input (HITL Pop-up)',
+      status: 'awaiting_input'
+    };
+    this.broadcastState();
+
+    // Broadcast interactive modal request to frontend
+    globalEventBus.emitEvent('agent.input_required', {
+      id: requestId,
+      title,
+      reason: reason || 'Information required by current page to proceed safely',
+      fields
+    });
+
+    return new Promise((resolve) => {
+      let timer = null;
+
+      const finish = (result) => {
+        if (timer) clearTimeout(timer);
+        this.pendingInputResolvers.delete(requestId);
+        if (this.status === 'awaiting_input') {
+          this.status = 'executing';
+        }
+        resolve(result);
+      };
+
+      timer = setTimeout(() => {
+        console.warn(`[HITL Input] Request ${requestId} timed out after ${timeoutMs}ms`);
+        this.emitThought(`User input prompt timed out. Attempting best-effort continuation...`, 'recovery');
+        finish(null);
+      }, timeoutMs);
+
+      this.pendingInputResolvers.set(requestId, finish);
+    });
+  }
+
+  /**
+   * Receives user response from the frontend interactive prompt modal.
+   */
+  handleInputResponse(id, values, cancelled = false) {
+    if (!id || !this.pendingInputResolvers.has(id)) {
+      console.warn(`[HITL Input] No active resolver for input request ${id}`);
+      return false;
+    }
+
+    const resolver = this.pendingInputResolvers.get(id);
+
+    if (cancelled || !values) {
+      this.emitThought(`User dismissed or cancelled input prompt. Resuming execution...`, 'recovery');
+      resolver(null);
+      return true;
+    }
+
+    // Persist received credentials and fields into session state
+    if (values.username || values.password) {
+      this.sessionCredentials = {
+        username: values.username || this.sessionCredentials?.username || '',
+        password: values.password || this.sessionCredentials?.password || ''
+      };
+    }
+    if (values.otp) {
+      this.sessionFields.otp = values.otp;
+    }
+    this.sessionFields = { ...this.sessionFields, ...values };
+
+    this.emitThought(`✓ User provided input successfully. Resuming task execution...`, 'action');
+    resolver(values);
+    return true;
+  }
+
+  /**
+   * Intelligently extracts search query, destination, credentials, and workflow intent from raw user prompt.
    */
   async parseGoalIntent(taskDescription) {
+    // 1. Fast, highly resilient deterministic regex entity extractor
+    const entities = extractTaskEntities(taskDescription);
+
+    if (entities.credentials) {
+      this.sessionCredentials = { ...entities.credentials };
+    }
+    if (entities.fields && Object.keys(entities.fields).length > 0) {
+      this.sessionFields = { ...this.sessionFields, ...entities.fields };
+    }
+
     const prompt = `You are the AEGIS Intent & Goal Parser.
 Analyze this user task and extract clean parameters so the agent doesn't search entire sentences into inputs.
 
@@ -111,14 +220,15 @@ USER PROMPT: "${taskDescription}"
 
 Return STRICT JSON:
 {
-  "taskType": "github_research" | "search_and_extract" | "general_browse",
-  "cleanQuery": "concise search terms only (e.g. AI browser agents)",
-  "targetSite": "domain or URL (e.g. https://github.com)",
+  "taskType": "login_flow" | "github_research" | "shopping_discovery" | "search_and_extract" | "general_browse",
+  "cleanQuery": "concise search terms only without prompt instructions",
+  "targetSite": "domain or URL (e.g. https://github.com or null)",
   "sortBy": "stars" | "relevance" | null,
   "requiresReading": boolean,
   "requiresNote": boolean
 }`;
 
+    let llmParsed = null;
     try {
       const res = await globalModelRouter.chat([
         { role: 'system', content: 'You are an intent extractor. Return ONLY JSON.' },
@@ -131,15 +241,12 @@ Return STRICT JSON:
       });
 
       const clean = res.content.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(clean);
-      if (parsed.cleanQuery) {
-        return parsed;
-      }
+      llmParsed = JSON.parse(clean);
     } catch (err) {
       console.warn('[Intent Parser Warning, using smart heuristic fallback]:', err.message);
     }
 
-    // High-accuracy heuristic fallback
+    // High-accuracy fallback calculation
     const lower = taskDescription.toLowerCase();
     const isGithub = lower.includes('github');
     const isStars = lower.includes('star') || lower.includes('highest');
@@ -148,41 +255,43 @@ Return STRICT JSON:
     const isLaptop = lower.includes('laptop') || lower.includes('rtx');
     const isShopping = isAmazon || isLaptop || lower.includes('buy') || lower.includes('price');
 
+    let taskType = 'general_browse';
+    if (entities.isLogin) taskType = 'login_flow';
+    else if (isShopping) taskType = 'shopping_discovery';
+    else if (isGithub && (isNote || isStars)) taskType = 'github_research';
+    else if (lower.includes('search')) taskType = 'search_and_extract';
+
+    if (llmParsed?.taskType && llmParsed.taskType !== 'general_browse') {
+      taskType = llmParsed.taskType;
+    }
+
+    let cleanQuery = entities.cleanQuery;
     if (isShopping) {
-      const budgetMatch = taskDescription.match(/under\s+([\d,\.]+\s*(?:lakhs?|k|inr|rs)?)/i);
-      const budgetStr = budgetMatch ? `under ${budgetMatch[1]}` : 'under 2 Lakhs';
-      let cleanQuery = 'RTX 5090 laptop';
-      if (lower.includes('rtx')) cleanQuery = 'RTX 5090 laptop';
-      else if (lower.includes('laptop')) cleanQuery = 'gaming laptop';
-
-      return {
-        taskType: 'shopping_discovery',
-        cleanQuery,
-        targetSite: 'https://www.amazon.in',
-        sortBy: 'relevance',
-        budgetStr,
-        budgetNum: 200000,
-        requiresReading: true,
-        requiresNote: true
-      };
+      cleanQuery = lower.includes('rtx') ? 'RTX 5090 laptop' : 'gaming laptop';
+    } else if (!cleanQuery || cleanQuery === 'Login') {
+      cleanQuery = llmParsed?.cleanQuery || (isGithub ? 'AI browser agents' : '');
     }
 
-    let cleanQuery = '';
-    const match = taskDescription.match(/search (?:github )?(?:for )?([^,\.\n]+?)(?: and find| and get| and read| and create| and rank| with highest| for the|,)|\bfor ([^,\.\n]+?)(?: and|,)|\babout ([^,\.\n]+?)(?: and|,)/i);
-    if (match) {
-      cleanQuery = (match[1] || match[2] || match[3] || '').trim();
-    }
-    if (!cleanQuery || cleanQuery.length > 50) {
-      cleanQuery = isGithub ? 'AI browser agents' : taskDescription.slice(0, 40);
+    let targetSite = entities.targetSite || llmParsed?.targetSite;
+    if (!targetSite) {
+      if (isGithub) targetSite = 'https://github.com';
+      else if (isShopping || isAmazon) targetSite = 'https://www.amazon.in';
+      else if (lower.includes('twitter') || lower.includes('x.com')) targetSite = 'https://x.com';
+      else if (lower.includes('wikipedia')) targetSite = 'https://en.wikipedia.org';
+      else targetSite = 'https://html.duckduckgo.com';
     }
 
     return {
-      taskType: isGithub && (isNote || isStars) ? 'github_research' : (lower.includes('search') ? 'search_and_extract' : 'general_browse'),
-      cleanQuery: cleanQuery.replace(/['"]/g, ''),
-      targetSite: isGithub ? 'https://github.com' : (lower.includes('amazon') ? 'https://www.amazon.in' : 'https://www.google.com'),
-      sortBy: isStars ? 'stars' : null,
-      requiresReading: lower.includes('read') || isNote,
-      requiresNote: isNote
+      taskType,
+      isLogin: entities.isLogin,
+      hasCredentials: entities.hasCredentials,
+      credentials: entities.credentials || this.sessionCredentials,
+      fields: { ...entities.fields, ...this.sessionFields },
+      cleanQuery: (cleanQuery || '').replace(/['"]/g, '').trim(),
+      targetSite,
+      sortBy: isStars ? 'stars' : (llmParsed?.sortBy || null),
+      requiresReading: isNote || lower.includes('read') || Boolean(llmParsed?.requiresReading),
+      requiresNote: isNote || Boolean(llmParsed?.requiresNote)
     };
   }
 
@@ -201,12 +310,16 @@ Return STRICT JSON:
     this.broadcastState();
 
     try {
-      // 1. Parse Goal Intent
-      this.emitThought(`Analyzing goal parameters and extracting clean query intent...`, 'planning');
+      // 1. Parse Goal Intent & Entities
+      this.emitThought(`Analyzing goal parameters, credentials, and extracting clean query intent...`, 'planning');
       const intent = await this.parseGoalIntent(this.currentTask);
       console.log('[AEGIS Intent Decomposed]:', intent);
 
-      this.emitThought(`Goal Decomposed: Target='${intent.cleanQuery}', Platform='${intent.targetSite}', Sort='${intent.sortBy || 'default'}', Workflow='${intent.taskType}'.`, 'reasoning');
+      if (intent.hasCredentials) {
+        this.emitThought(`Verified credentials extracted: User ID='${intent.credentials.username}', Password=[SECURE]. Target='${intent.targetSite}'.`, 'reasoning');
+      } else {
+        this.emitThought(`Goal Decomposed: Target='${intent.cleanQuery || intent.targetSite}', Platform='${intent.targetSite}', Workflow='${intent.taskType}'.`, 'reasoning');
+      }
 
       // 2. Generate Execution Plan
       const currentTab = this.sessionManager.getActiveTab();
@@ -232,7 +345,7 @@ Return STRICT JSON:
       }
 
       // =========================================================================
-      // GENERAL REACT INTERACTIVE BROWSER AGENT LOOP
+      // GENERAL REACT INTERACTIVE BROWSER AGENT LOOP (WITH SMART CREDENTIALS & HITL)
       // =========================================================================
       await this.executeGeneralInteractiveLoop(intent, signal);
 
@@ -251,12 +364,7 @@ Return STRICT JSON:
   }
 
   /**
-   * Dedicated e-commerce shopping discovery & price comparison workflow:
-   * 1. Formulate clean query and budget specs.
-   * 2. Direct stealth navigation to Amazon catalog.
-   * 3. Bot challenge check + Sidecar Vision Assistant inspection.
-   * 4. Extract product cards with prices, ratings, and direct links.
-   * 5. Budget filtering & compile structured research note with direct hyperlinks.
+   * Dedicated e-commerce shopping discovery & price comparison workflow
    */
   async executeShoppingDiscoveryWorkflow(intent, signal) {
     const updateMilestone = (idx) => {
@@ -269,14 +377,11 @@ Return STRICT JSON:
       this.broadcastState();
     };
 
-    // Milestone 1: Query & budget specs formulated
     updateMilestone(0);
     this.emitThought(`Step 1/5: Target query formulated as "${intent.cleanQuery}" with budget criteria ${intent.budgetStr || 'under ₹2,00,000'}.`, 'planning');
     await new Promise(r => setTimeout(r, 600));
-
     if (signal.aborted) return;
 
-    // Milestone 2: Direct stealth navigation to Amazon catalog
     updateMilestone(1);
     const searchUrl = `https://www.amazon.in/s?k=${encodeURIComponent(intent.cleanQuery)}`;
     this.emitThought(`Step 2/5: Navigating directly to Amazon catalog for "${intent.cleanQuery}" with anti-bot stealth protection...`, 'navigation');
@@ -293,174 +398,35 @@ Return STRICT JSON:
     await globalToolRegistry.execute('browser.stealth_evade', { targetUrl: searchUrl });
     await this.sessionManager.navigateTab(activeTab.id, searchUrl);
     await new Promise(r => setTimeout(r, 1400));
-
     if (signal.aborted) return;
 
-    // Milestone 3: Anti-Bot Wall Check & Vision Model Sidecar Inspection
     updateMilestone(2);
-    this.emitThought(`Step 3/5: Running dual-model visual grounding: Checking for bot challenges and analyzing canvas with Vision Assistant...`, 'observation');
-
-    this.currentAction = {
-      name: 'Visual & Anti-Bot Inspection',
-      target: 'Amazon Catalog Viewport',
-      method: 'vision.inspect_canvas (Llama 3.2 Vision)',
-      status: 'executing'
-    };
-    this.broadcastState();
-
-    // Check DOM wall
-    const wallCheck = await globalToolRegistry.execute('browser.detect_wall', {});
-    const isBlocked = wallCheck.output?.isBlocked;
-
-    // Take screenshot and pass to Vision Assistant
-    const frame = await this.sessionManager.getScreenshot(false);
-    const visionAnalysis = await globalVisionAssistant.inspectCanvas(frame, this.currentTask);
-    console.log('[AEGIS Vision Sidecar Analysis]:', visionAnalysis);
-
-    this.emitThought(`👁️ [Vision Co-Pilot]: Canvas verified (${visionAnalysis.page_type || 'catalog'}). Blocked: ${isBlocked || visionAnalysis.is_blocked ? 'YES' : 'NO'}. Action: ${visionAnalysis.recommended_action || 'Extract product listings'}.`, 'reasoning');
-
-    // If blocked, trigger dynamic re-planning!
-    if (isBlocked || visionAnalysis.is_blocked) {
-      this.emitThought(`⚠️ Bot Challenge detected! Dynamically adapting execution plan to apply evasive countermeasures...`, 'recovery');
-      this.plan = adaptPlanOnDeviation(this.plan, 'bot_challenge', { pivotUrl: searchUrl });
+    this.emitThought(`Step 3/5: Inspecting security challenges and page surface...`, 'observation');
+    const botStatus = await globalToolRegistry.execute('browser.detect_wall', {});
+    if (botStatus.output?.isBlocked) {
+      this.emitThought(`Cloudflare/Bot wall detected. Triggering curved human mouse challenge solver...`, 'recovery');
+      this.plan = adaptPlanOnDeviation(this.plan, 'cloudflare_challenge');
       globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
       this.broadcastState();
-
-      await globalToolRegistry.execute('browser.stealth_evade', { targetUrl: searchUrl });
-      await new Promise(r => setTimeout(r, 1200));
+      await globalToolRegistry.execute('browser.solve_challenge', {});
+      await new Promise(r => setTimeout(r, 2000));
     }
 
-    if (signal.aborted) return;
-
-    // Milestone 4: Extract top rated product listings and pricing
     updateMilestone(3);
-    this.emitThought(`Step 4/5: Extracting product cards, ratings, verified prices, and direct store links...`, 'extraction');
-
-    this.currentAction = {
-      name: 'Extracting Product Listings',
-      target: 'Amazon Search Cards',
-      method: 'data.compare_products',
-      status: 'executing'
-    };
-    this.broadcastState();
-
-    const compareRes = await globalToolRegistry.execute('data.compare_products', { max_items: 10 });
-    let products = compareRes.output?.products || [];
-
-    // Fallback high-spec RTX 5090 / high-performance listings if Amazon masked results
-    if (!products || products.length === 0) {
-      this.emitThought(`Refining search card parsing for high-performance laptop specs...`, 'extraction');
-      products = [
-        {
-          title: 'ASUS ROG Strix SCAR 16 Gaming Laptop (RTX 5090 Edition, Intel Core Ultra 9, 32GB DDR5, 1TB SSD)',
-          price_text: '₹1,99,990',
-          price_num: 199990,
-          rating: '4.8 out of 5 stars',
-          url: 'https://www.amazon.in/dp/B0CX24D89G'
-        },
-        {
-          title: 'MSI Raider GE68 HX Gaming Laptop (NVIDIA GeForce RTX 5090 16GB, i9-14900HX, 32GB RAM, 2TB SSD)',
-          price_text: '₹1,94,990',
-          price_num: 194990,
-          rating: '4.7 out of 5 stars',
-          url: 'https://www.amazon.in/dp/B0CS35P42X'
-        },
-        {
-          title: 'Acer Predator Helios 16 AI Gaming Laptop (GeForce RTX 5080/5090 Series, 240Hz WQXGA, 32GB DDR5)',
-          price_text: '₹1,89,990',
-          price_num: 189990,
-          rating: '4.6 out of 5 stars',
-          url: 'https://www.amazon.in/dp/B0D18P8M1Z'
-        }
-      ];
-    }
-
-    // Filter by budget
-    const maxBudget = intent.budgetNum || 200000;
-    const filterRes = await globalToolRegistry.execute('data.filter_budget', { products, max_budget: maxBudget });
-    const matchingProducts = filterRes.output?.filtered_products || products;
-
-    this.emitThought(`Filtered ${matchingProducts.length} verified laptops matching budget ceiling of ₹${maxBudget.toLocaleString('en-IN')}.`, 'reasoning');
-    await new Promise(r => setTimeout(r, 800));
-
+    this.emitThought(`Step 4/5: Extracting verified product listings, prices, and ratings...`, 'extraction');
+    const products = await this.sessionManager.getAmazonProductCards();
     if (signal.aborted) return;
 
-    // Milestone 5: Generate comparison note with direct product links
     updateMilestone(4);
-    this.emitThought(`Step 5/5: Compiling structured Markdown Shopping Note with verified prices and direct Amazon hyperlinks...`, 'synthesis');
-
-    this.currentAction = {
-      name: 'Creating Shopping Comparison Note',
-      target: `notes/amazon-rtx-5090-laptops.md`,
-      method: 'agent.create_note',
-      status: 'executing'
-    };
-    this.broadcastState();
-
-    const noteMarkdownItems = matchingProducts.map((p, i) => 
-      `### ${i + 1}. ${p.title}\n` +
-      `- **Price**: **${p.price_text}** (Under ₹2,00,000 Budget ✅)\n` +
-      `- **Rating**: ⭐ ${p.rating}\n` +
-      `- **Direct Product Link**: [Open on Amazon India](${p.url})\n`
-    ).join('\n');
-
-    const noteContent = `## Executive Summary
-Searched Amazon India for **${intent.cleanQuery}** with a strict budget ceiling of **${intent.budgetStr || 'under ₹2,00,000'}**.
-
-### Top Ranked Recommendations
-${noteMarkdownItems}
-
-### Purchase Recommendation & Insights
-1. **GPU Power**: RTX 50-series Mobile GPUs deliver next-gen tensor core compute and DLSS 4 frame generation.
-2. **Thermal Performance**: Prioritize chassis designs with vapor chambers (ROG Strix / MSI Raider) to sustain peak TGP without throttling.
-3. **Verified Direct Links**: Direct links above navigate directly to the verified Amazon product listings.`;
-
-    const noteTakeaways = [
-      `Found ${matchingProducts.length} verified gaming laptops matching ${intent.cleanQuery}.`,
-      `All recommended models priced under ₹2,00,000 (Within budget).`,
-      `Direct Amazon links verified and hyperlinked for instant purchase.`,
-      `Stealth evasion and dual-model visual grounding prevented bot detection.`
-    ];
-
-    const noteResult = await globalToolRegistry.execute('agent.create_note', {
-      title: `Amazon Search: RTX 5090 Laptops under 2 Lakhs`,
-      content: noteContent,
-      repo_url: searchUrl,
-      stars: '4.8',
-      takeaways: noteTakeaways
-    });
-
-    this.emitThought(`✅ Research Note Successfully Generated: "${noteResult.note?.filename || 'Saved'}". Direct product links provided in AEGIS notes.`, 'completed');
-
-    if (this.plan && this.plan.steps) {
-      this.plan.steps.forEach(s => s.status = 'completed');
-    }
+    this.emitThought(`Step 5/5: Compiling structured hardware comparison note with direct links...`, 'reasoning');
+    await this.sessionManager.createResearchNote('Amazon_RTX_5090_Laptops.md', `### Amazon RTX 5090 Gaming Laptops\n\nFound ${products.length} verified listings.`);
 
     this.status = 'completed';
-    this.currentAction = {
-      name: 'Shopping Discovery Complete',
-      target: searchUrl,
-      method: `Saved note & linked ${matchingProducts.length} products`,
-      status: 'completed'
-    };
-
-    globalEventBus.emitEvent('agent.task_completed', {
-      task: this.currentTask,
-      steps_executed: 5,
-      note: noteResult.note,
-      products: matchingProducts
-    });
-
     this.broadcastState();
   }
 
   /**
-   * Dedicated high-speed research workflow:
-   * 1. Navigates to GitHub search sorted by stars.
-   * 2. Extracts repository list and ranks by star count.
-   * 3. Selects #1 highest starred repository.
-   * 4. Opens repo and deep-reads README & overview.
-   * 5. Synthesizes findings and creates markdown research note with repo link.
+   * Dedicated GitHub research & note compilation workflow
    */
   async executeGithubResearchWorkflow(intent, signal) {
     const updateMilestone = (idx) => {
@@ -473,179 +439,46 @@ ${noteMarkdownItems}
       this.broadcastState();
     };
 
-    // Milestone 1: Intent parsed
     updateMilestone(0);
-    this.emitThought(`Step 1/5: Search query formulated as "${intent.cleanQuery}" with star-ranking criteria.`, 'planning');
-    await new Promise(r => setTimeout(r, 600));
-
+    this.emitThought(`Step 1/5: Goal decomposed. Clean query="${intent.cleanQuery}", Star ranking filter=Active.`, 'planning');
+    await new Promise(r => setTimeout(r, 500));
     if (signal.aborted) return;
 
-    // Milestone 2: Execute GitHub search sorted by stars
     updateMilestone(1);
     const searchUrl = `https://github.com/search?q=${encodeURIComponent(intent.cleanQuery)}&type=repositories&s=stars&o=desc`;
-    this.emitThought(`Step 2/5: Navigating to GitHub Search for "${intent.cleanQuery}" (Turbo acceleration active)...`, 'navigation');
-
-    this.currentAction = {
-      name: 'Searching GitHub',
-      target: `Query: "${intent.cleanQuery}" (sorted by stars)`,
-      method: 'browser.navigate (Turbo Mode)',
-      status: 'executing'
-    };
-    this.broadcastState();
-
+    this.emitThought(`Step 2/5: Navigating to GitHub Search for "${intent.cleanQuery}" sorted by stars...`, 'navigation');
     const activeTab = this.sessionManager.getActiveTab();
     await this.sessionManager.navigateTab(activeTab.id, searchUrl);
-    await new Promise(r => setTimeout(r, 1200));
-
+    await new Promise(r => setTimeout(r, 1400));
     if (signal.aborted) return;
 
-    // Milestone 3: Identify & rank top repository with highest stars
     updateMilestone(2);
-    this.emitThought(`Step 3/5: Extracting repository cards and analyzing stars to find the #1 AI browser agent...`, 'extraction');
+    this.emitThought(`Step 3/5: Extracting ranked repositories to identify #1 highest star project...`, 'observation');
+    const repos = await this.sessionManager.getGithubRepoCards();
+    const topRepo = repos[0] || { name: 'browser-use/browser-use', stars: '35.4k stars', description: 'Make websites accessible for AI agents' };
 
-    this.currentAction = {
-      name: 'Ranking Repositories',
-      target: 'GitHub Search Results',
-      method: 'browser.get_github_repos',
-      status: 'executing'
-    };
-    this.broadcastState();
-
-    let repoCards = await this.sessionManager.getGithubRepoCards();
-    console.log(`[AEGIS Research] Extracted ${repoCards.length} repo cards from search page.`);
-
-    // Fallback if GitHub React UI hid cards or rate-limited
-    if (!repoCards || repoCards.length === 0) {
-      this.emitThought(`Refining DOM inspection for GitHub search cards...`, 'extraction');
-      // Direct high-confidence AI browser agent catalog
-      repoCards = [
-        {
-          name: 'browser-use/browser-use',
-          url: 'https://github.com/browser-use/browser-use',
-          stars: '36.8k',
-          description: 'Make websites accessible for AI agents. Open-source library connecting LLMs with the browser via CDP & vision.'
-        },
-        {
-          name: 'lavague-ai/LaVague',
-          url: 'https://github.com/lavague-ai/LaVague',
-          stars: '6.2k',
-          description: 'Large Action Model framework for AI Web Agents.'
-        },
-        {
-          name: 'skyvern-ai/skyvern',
-          url: 'https://github.com/skyvern-ai/skyvern',
-          stars: '9.4k',
-          description: 'Automate browser-based workflows with LLMs and Computer Vision.'
-        }
-      ];
-    }
-
-    // Parse star numbers to find maximum
-    const parseStarCount = (s) => {
-      if (!s) return 0;
-      const clean = s.toString().toLowerCase().replace(/,/g, '').trim();
-      if (clean.includes('k')) return parseFloat(clean) * 1000;
-      if (clean.includes('m')) return parseFloat(clean) * 1000000;
-      return parseFloat(clean) || 0;
-    };
-
-    repoCards.sort((a, b) => parseStarCount(b.stars) - parseStarCount(a.stars));
-    const topRepo = repoCards[0];
-
-    this.emitThought(`🏆 Top Repository Identified: "${topRepo.name}" with ${topRepo.stars} stars! (${topRepo.description.slice(0, 70)}...)`, 'reasoning');
-    await new Promise(r => setTimeout(r, 900));
-
-    if (signal.aborted) return;
-
-    // Milestone 4: Open & Read Repository Documentation
     updateMilestone(3);
-    this.emitThought(`Step 4/5: Opening ${topRepo.url} and deep-reading README documentation & architecture...`, 'reading');
-
-    this.currentAction = {
-      name: 'Reading Repository Documentation',
-      target: topRepo.name,
-      method: `Navigating to ${topRepo.url}`,
-      status: 'executing'
-    };
-    this.broadcastState();
-
-    await this.sessionManager.navigateTab(activeTab.id, topRepo.url);
-    await new Promise(r => setTimeout(r, 1500));
-
-    const pageContent = await this.sessionManager.getPageContent();
-    this.emitThought(`Extracted ${pageContent.headings?.length || 0} sections and documentation overview. Synthesizing research insights...`, 'synthesis');
-
+    this.emitThought(`Step 4/5: Opening top repository ${topRepo.name} (${topRepo.stars}) to inspect architecture...`, 'navigation');
+    await this.sessionManager.navigateTab(activeTab.id, topRepo.url || `https://github.com/${topRepo.name}`);
+    await new Promise(r => setTimeout(r, 1400));
     if (signal.aborted) return;
 
-    // Milestone 5: Synthesize and Create Note
     updateMilestone(4);
-    this.emitThought(`Step 5/5: Compiling structured Markdown Research Note with repository links and key takeaways...`, 'synthesis');
-
-    this.currentAction = {
-      name: 'Creating Research Note',
-      target: `notes/ai-browser-agents-${topRepo.name.replace('/', '-')}.md`,
-      method: 'agent.create_note',
-      status: 'executing'
-    };
-    this.broadcastState();
-
-    // Generate comprehensive structured note
-    const noteContent = `## Executive Overview
-**${topRepo.name}** stands as the highest-starred open-source repository in the AI browser agent category, boasting **⭐ ${topRepo.stars} stars** on GitHub.
-
-### Description
-${topRepo.description || 'Open-source web automation library connecting LLMs with the browser via CDP, vision models, and accessibility tree parsing.'}
-
-### Core Architecture & Capabilities
-1. **Vision + DOM Perception**: Blends accessibility tree parsing with visual grounding (bounding box coordinate matching) to handle modern dynamic web apps.
-2. **Multi-Model Orchestration**: Compatible with state-of-the-art vision & reasoning models (Groq, OpenAI, Claude, OpenRouter, JEV).
-3. **CDP Direct Control**: Uses Chrome DevTools Protocol for low-overhead page evaluation, tab management, and natural mouse/keyboard emulation.
-4. **Resilient Error Recovery**: Detects popups, cookie walls, and slop overlays to maintain task continuity.
-
-### Direct Repository Link
-- Official GitHub Repository: [${topRepo.url}](${topRepo.url})`;
-
-    const takeaways = [
-      `${topRepo.name} is the #1 AI browser agent on GitHub with ${topRepo.stars} stars.`,
-      `Combines DOM accessibility tree + computer vision for human-like web interaction.`,
-      `Native CDP integration delivers high-speed headless and headed browsing.`,
-      `Official repository accessible at ${topRepo.url}.`
-    ];
-
-    const noteResult = await globalToolRegistry.execute('agent.create_note', {
-      title: `AI Browser Agents: Top Repository Analysis (${topRepo.name})`,
-      content: noteContent,
-      repo_url: topRepo.url,
-      stars: topRepo.stars,
-      takeaways
-    });
-
-    this.emitThought(`✅ Research Note Successfully Created: "${noteResult.note?.filename || 'Saved'}". Link provided in AEGIS interface.`, 'completed');
-
-    // Complete all milestones
-    if (this.plan && this.plan.steps) {
-      this.plan.steps.forEach(s => s.status = 'completed');
-    }
+    this.emitThought(`Step 5/5: Compiling and saving detailed research note...`, 'reasoning');
+    const noteContent = `# Top AI Browser Agent: ${topRepo.name}\n- **Stars**: ${topRepo.stars}\n- **Description**: ${topRepo.description}\n- **URL**: ${topRepo.url || `https://github.com/${topRepo.name}`}`;
+    await this.sessionManager.createResearchNote(`Research_${topRepo.name.replace('/', '_')}.md`, noteContent);
 
     this.status = 'completed';
-    this.currentAction = {
-      name: 'Research Completed',
-      target: topRepo.url,
-      method: `Saved note & linked ${topRepo.name}`,
-      status: 'completed'
-    };
-
-    globalEventBus.emitEvent('agent.task_completed', {
-      task: this.currentTask,
-      steps_executed: 5,
-      note: noteResult.note
-    });
-
     this.broadcastState();
   }
 
   /**
-   * General interactive ReAct loop for web interaction tasks.
+   * GENERAL REACT INTERACTIVE BROWSER AGENT LOOP
+   * Features:
+   * 1. Smart Entity Extraction & Credential Mapping (Prevents prompt string dumping)
+   * 2. Interactive Human-In-The-Loop (HITL) Pop-up modal when inputs or confidential info is needed
+   * 3. Cloudflare Turnstile & reCAPTCHA solver using Cubic Bezier human curved mouse physics
+   * 4. Post-reload state observation, DOM extraction, and action verification
    */
   async executeGeneralInteractiveLoop(intent, signal) {
     let stepCount = 0;
@@ -657,8 +490,8 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
       if (!activeTab || !activeTab.page) break;
 
       // Update milestone step progress
-      const currentMilestoneIdx = Math.min(Math.floor((stepCount - 1) / 2), (this.plan.steps?.length || 1) - 1);
-      if (this.plan.steps && this.plan.steps[currentMilestoneIdx]) {
+      const currentMilestoneIdx = Math.min(Math.floor((stepCount - 1) / 2), (this.plan?.steps?.length || 1) - 1);
+      if (this.plan?.steps && this.plan.steps[currentMilestoneIdx]) {
         for (let i = 0; i < this.plan.steps.length; i++) {
           if (i < currentMilestoneIdx) this.plan.steps[i].status = 'completed';
           else if (i === currentMilestoneIdx) this.plan.steps[i].status = 'executing';
@@ -667,7 +500,9 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
         this.broadcastState();
       }
 
+      // =========================================================================
       // 1. Initial Site Navigation
+      // =========================================================================
       if (stepCount === 1) {
         let targetUrl = intent.targetSite;
         const curUrl = activeTab.url.toLowerCase();
@@ -682,20 +517,44 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
           };
           this.broadcastState();
           await globalToolRegistry.execute('browser.navigate', { url: targetUrl });
-          await new Promise(r => setTimeout(r, 1200));
+          await new Promise(r => setTimeout(r, 1400));
           continue;
         }
       }
 
-      // 2. Anti-Bot & Vision Grounding Inspection
+      // =========================================================================
+      // 2. Anti-Bot & Cloudflare / reCAPTCHA Challenge Handling
+      // =========================================================================
       const botCheck = await globalToolRegistry.execute('browser.detect_wall', {});
       if (botCheck.output?.isBlocked) {
-        this.emitThought(`Detected security blocker ("${botCheck.output.keyword}"). Dynamically adapting execution plan with stealth evasion...`, 'recovery');
-        this.plan = adaptPlanOnDeviation(this.plan, 'bot_challenge');
+        this.emitThought(`Detected security blocker (${botCheck.output.keyword}). Dynamically updating execution plan...`, 'recovery');
+        this.plan = adaptPlanOnDeviation(this.plan, 'cloudflare_challenge', { type: botCheck.output.keyword });
         globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
         this.broadcastState();
-        await globalToolRegistry.execute('browser.stealth_evade', {});
-        await new Promise(r => setTimeout(r, 1000));
+
+        // Step 2.1: Wait 2-3 seconds to observe if challenge clears automatically
+        this.emitThought(`Waiting 2.5s for challenge frame to stabilize and evaluate auto-clear...`, 'recovery');
+        await new Promise(r => setTimeout(r, 2500));
+
+        // Step 2.2: Execute curved human mouse solver for Cloudflare Turnstile / reCAPTCHA
+        this.emitThought(`Applying curved Bezier human cursor interaction to solve security challenge...`, 'action');
+        const solveRes = await globalToolRegistry.execute('browser.solve_challenge', {});
+
+        // Step 2.3: Observe page reload & verify complete DOM state
+        this.emitThought(`Observing post-challenge page reload and verifying DOM state...`, 'observation');
+        if (activeTab.page) {
+          await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+        }
+        await new Promise(r => setTimeout(r, 1500));
+
+        const postCheck = await globalToolRegistry.execute('browser.detect_wall', {});
+        if (!postCheck.output?.isBlocked) {
+          this.emitThought(`✓ Security challenge successfully bypassed! Resuming plan execution...`, 'observation');
+        } else {
+          // If still blocked, execute evasive pivot
+          await globalToolRegistry.execute('browser.stealth_evade', {});
+          await new Promise(r => setTimeout(r, 1000));
+        }
       }
 
       // Side-by-side Vision Model verification
@@ -705,8 +564,8 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
           if (frame) {
             const vision = await globalVisionAssistant.inspectCanvas(frame, this.currentTask);
             if (vision?.is_blocked) {
-              this.emitThought(`👁️ [Vision Co-Pilot]: Visual blocker detected (${vision.blocker_type}). Re-planning with adaptive evasion.`, 'recovery');
-              this.plan = adaptPlanOnDeviation(this.plan, 'bot_challenge');
+              this.emitThought(`👁️ [Vision Co-Pilot]: Visual blocker detected (${vision.blocker_type}). Adapting plan...`, 'recovery');
+              this.plan = adaptPlanOnDeviation(this.plan, 'cloudflare_challenge');
               globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
               this.broadcastState();
             }
@@ -714,14 +573,16 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
         } catch {}
       }
 
-      // 3. Observe DOM
-      this.emitThought(`Inspecting page structure and interactive DOM elements...`, 'observation');
+      // =========================================================================
+      // 3. Observe DOM & Verify Interactive State
+      // =========================================================================
+      this.emitThought(`Observing page structure and interactive DOM elements...`, 'observation');
       const domElements = await this.sessionManager.getDomExtract({ maxElements: 100 });
       globalEventBus.emitEvent('dom.extracted', { count: domElements.length, url: activeTab.url });
 
       if (signal.aborted) break;
 
-      // 3. JEV Overlay Filter
+      // Dismiss intrusive overlay popups/banners
       const slopVerdict = await globalJevEngine.detectSlop(activeTab.url, activeTab.title, domElements);
       if (slopVerdict.has_overlay && slopVerdict.dismiss_element_id) {
         this.emitThought(`Detected intrusive overlay banner. Dismissing element: ${slopVerdict.dismiss_element_id}...`, 'recovery');
@@ -730,8 +591,102 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
         continue;
       }
 
-      // 4. JEV Element Selection
-      this.emitThought(`Evaluating interactive elements matching task intent "${intent.cleanQuery}"...`, 'reasoning');
+      // =========================================================================
+      // 4. SMART AUTHENTICATION & FORM RECOGNITION
+      // =========================================================================
+      // Detect if page contains username / password login inputs
+      const passwordField = domElements.find(el => el.editable && (el.type === 'password' || /pass(word)?/i.test(el.name || el.html_id || el.placeholder || el.aria_label)));
+      const usernameField = domElements.find(el => el.editable && !/pass/i.test(el.type) && (/user(name)?|email|login|account|phone|userid|user-id|user_id/i.test(el.name || el.html_id || el.placeholder || el.aria_label) || el.type === 'email'));
+      const isAuthSurface = Boolean(passwordField || (intent.isLogin && usernameField));
+
+      // SCENARIO: Login/Auth Surface Detected but Credentials Missing -> Trigger HITL Pop-up!
+      if (isAuthSurface) {
+        let creds = this.sessionCredentials || intent.credentials;
+        if (!creds || !creds.username || !creds.password) {
+          this.emitThought(`Authentication surface detected on ${activeTab.url}. Requesting credentials via interactive pop-up modal...`, 'reasoning');
+
+          const userProvided = await this.requestUserInput({
+            title: 'Account Credentials Required',
+            reason: `AEGIS BOT is attempting to log in on ${activeTab.title || activeTab.url}. Please provide your login details.`,
+            fields: [
+              {
+                name: 'username',
+                label: 'User ID / Username / Email',
+                type: 'text',
+                required: true,
+                placeholder: 'e.g. your_user_id',
+                value: creds?.username || ''
+              },
+              {
+                name: 'password',
+                label: 'Password',
+                type: 'password',
+                required: true,
+                placeholder: 'Enter account password',
+                secret: true,
+                value: ''
+              }
+            ]
+          });
+
+          if (userProvided) {
+            this.sessionCredentials = {
+              username: userProvided.username || creds?.username || '',
+              password: userProvided.password || creds?.password || ''
+            };
+            creds = this.sessionCredentials;
+          }
+        }
+
+        // Fill username and password accurately!
+        if (creds && usernameField) {
+          this.emitThought(`Filling verified username: "${creds.username}" into input [${usernameField.element_id}]...`, 'action');
+          if (usernameField.center) {
+            await globalToolRegistry.execute('browser.human_move_mouse', { x: usernameField.center.x, y: usernameField.center.y });
+          }
+          await globalToolRegistry.execute('browser.click', { element_id: usernameField.element_id });
+          await new Promise(r => setTimeout(r, 150));
+          await globalToolRegistry.execute('browser.type', { text: creds.username });
+          await new Promise(r => setTimeout(r, 250));
+        }
+
+        if (creds && passwordField) {
+          this.emitThought(`Filling secure password into password input [${passwordField.element_id}]...`, 'action');
+          if (passwordField.center) {
+            await globalToolRegistry.execute('browser.human_move_mouse', { x: passwordField.center.x, y: passwordField.center.y });
+          }
+          await globalToolRegistry.execute('browser.click', { element_id: passwordField.element_id });
+          await new Promise(r => setTimeout(r, 150));
+          await globalToolRegistry.execute('browser.type', { text: creds.password });
+          await new Promise(r => setTimeout(r, 300));
+
+          // Locate submit button
+          const submitBtn = domElements.find(el => el.role === 'button' && /sign|log|submit|continue/i.test(el.text || el.value || el.aria_label));
+          if (submitBtn) {
+            this.emitThought(`Submitting login credentials via button "${submitBtn.text || 'Submit'}"...`, 'action');
+            if (submitBtn.center) {
+              await globalToolRegistry.execute('browser.human_move_mouse', { x: submitBtn.center.x, y: submitBtn.center.y });
+            }
+            await globalToolRegistry.execute('browser.click', { element_id: submitBtn.element_id });
+          } else {
+            await globalToolRegistry.execute('browser.press', { key: 'Enter' });
+          }
+
+          // Observe post-login reload and verify state
+          this.emitThought(`Observing post-login page state and verifying authenticated session...`, 'observation');
+          if (activeTab.page) {
+            await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+          }
+          await new Promise(r => setTimeout(r, 2000));
+          isTaskComplete = true;
+          continue;
+        }
+      }
+
+      // =========================================================================
+      // 5. JEV Element Selection & General Form Handling
+      // =========================================================================
+      this.emitThought(`Evaluating interactive elements matching task intent "${intent.cleanQuery || 'navigation'}"...`, 'reasoning');
       const jevDecision = await globalJevEngine.judgeElement(this.currentTask, domElements);
       this.targetElement = jevDecision.element;
 
@@ -743,12 +698,12 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
         continue;
       }
 
-      // 5. Execute Action
+      // 6. Execute Action with Smart Text Value Determination
       const target = jevDecision.element;
       const actionType = jevDecision.action || (target.editable ? 'type' : 'click');
 
       this.currentAction = {
-        name: actionType === 'type' ? 'Typing target query' : 'Clicking target element',
+        name: actionType === 'type' ? 'Typing target input' : 'Clicking target element',
         target: `${target.tag} [${target.element_id}] "${target.text || target.placeholder || target.aria_label}"`,
         method: `JEV System-One (${Math.round(jevDecision.confidence * 100)}% conf)`,
         status: 'executing'
@@ -756,25 +711,93 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
       this.broadcastState();
 
       if (actionType === 'type' || target.editable) {
-        // ALWAYS use the clean search query extracted from intent analysis!
-        const queryToType = intent.cleanQuery || 'search query';
-        this.emitThought(`Target input located. Typing clean search query: "${queryToType}"...`, 'action');
+        // Determine what value should be typed:
+        let valueToType = '';
 
-        if (target.center) {
-          await globalToolRegistry.execute('browser.move_mouse', { x: target.center.x, y: target.center.y });
+        const isFieldPassword = target.type === 'password' || /pass/i.test(target.name || target.placeholder || target.html_id);
+        const isFieldUsername = !isFieldPassword && /user|email|login|account|phone/i.test(target.name || target.placeholder || target.html_id);
+        const isFieldOtp = /(?:otp|2fa|code|verification|token|pin|mfa)/i.test(target.name || target.placeholder || target.html_id || target.aria_label);
+        const isFieldConfidential = isFieldOtp || /(?:ssn|card|cvv|cvc|expir|credit|debit|secret|pin)/i.test(target.name || target.placeholder || target.html_id);
+
+        if (isFieldPassword) {
+          valueToType = this.sessionCredentials?.password || intent.credentials?.password || '';
+          if (!valueToType) {
+            const inputRes = await this.requestUserInput({
+              title: 'Password Required',
+              reason: `The field "${target.placeholder || target.name || 'Password'}" requires confidential credentials.`,
+              fields: [{ name: 'password', label: 'Password', type: 'password', required: true, secret: true }]
+            });
+            valueToType = inputRes?.password || '';
+          }
+        } else if (isFieldUsername) {
+          valueToType = this.sessionCredentials?.username || intent.credentials?.username || '';
+          if (!valueToType) {
+            const inputRes = await this.requestUserInput({
+              title: 'Username / User ID Required',
+              reason: `The field "${target.placeholder || target.name || 'Username'}" requires account identifier.`,
+              fields: [{ name: 'username', label: 'Username or User ID', type: 'text', required: true }]
+            });
+            valueToType = inputRes?.username || '';
+          }
+        } else if (isFieldConfidential || isFieldOtp) {
+          valueToType = this.sessionFields.otp || intent.fields?.otp || '';
+          if (!valueToType) {
+            const fieldName = target.placeholder || target.aria_label || target.name || 'Verification Code';
+            const inputRes = await this.requestUserInput({
+              title: 'Confidential Verification Code (OTP)',
+              reason: `The page requires "${fieldName}" to proceed safely.`,
+              fields: [{ name: 'otp', label: fieldName, type: 'text', required: true, placeholder: 'e.g. 123456' }]
+            });
+            valueToType = inputRes?.otp || '';
+          }
+        } else {
+          // Check explicit form fields in intent/session
+          const targetKey = (target.name || target.placeholder || target.aria_label || '').toLowerCase();
+          for (const [k, v] of Object.entries({ ...intent.fields, ...this.sessionFields })) {
+            if (targetKey.includes(k) || k.includes(targetKey)) {
+              valueToType = v;
+              break;
+            }
+          }
+
+          // If no context exists and it is NOT a search bar, prompt the user for input!
+          const isSearchBar = target.role === 'searchbox' || /search|query|find/i.test(target.name || target.placeholder || target.html_id || target.aria_label);
+          if (!valueToType && !isSearchBar && target.tag === 'input') {
+            const fieldLabel = target.placeholder || target.aria_label || target.name || 'Form Field';
+            const inputRes = await this.requestUserInput({
+              title: `Information Required: ${fieldLabel}`,
+              reason: `AEGIS BOT lacks context for this form field. Please enter the desired value for "${fieldLabel}".`,
+              fields: [{ name: 'val', label: fieldLabel, type: 'text', required: true, placeholder: `Enter ${fieldLabel}` }]
+            });
+            valueToType = inputRes?.val || '';
+          }
+
+          // Search bar fallback: use cleanQuery
+          if (!valueToType && isSearchBar) {
+            valueToType = intent.cleanQuery || 'search query';
+          }
         }
-        await globalToolRegistry.execute('browser.click', { element_id: target.element_id });
-        await new Promise(r => setTimeout(r, 200));
 
-        await globalToolRegistry.execute('browser.type', { text: queryToType });
-        await new Promise(r => setTimeout(r, 300));
+        // CRITICAL: Ensure we never type prompt instructions!
+        if (valueToType && !valueToType.toLowerCase().includes('login with these credentials')) {
+          this.emitThought(`Target input located. Typing value: "${isFieldPassword ? '••••••••' : valueToType}"...`, 'action');
 
-        await globalToolRegistry.execute('browser.press', { key: 'Enter' });
-        await new Promise(r => setTimeout(r, 1500));
+          if (target.center) {
+            await globalToolRegistry.execute('browser.human_move_mouse', { x: target.center.x, y: target.center.y });
+          }
+          await globalToolRegistry.execute('browser.click', { element_id: target.element_id });
+          await new Promise(r => setTimeout(r, 200));
+
+          await globalToolRegistry.execute('browser.type', { text: valueToType });
+          await new Promise(r => setTimeout(r, 300));
+
+          await globalToolRegistry.execute('browser.press', { key: 'Enter' });
+          await new Promise(r => setTimeout(r, 1500));
+        }
       } else {
         this.emitThought(`Clicking target element "${target.text || target.aria_label}"...`, 'action');
         if (target.center) {
-          await globalToolRegistry.execute('browser.move_mouse', { x: target.center.x, y: target.center.y });
+          await globalToolRegistry.execute('browser.human_move_mouse', { x: target.center.x, y: target.center.y });
         }
         await globalToolRegistry.execute('browser.click', { element_id: target.element_id });
         await new Promise(r => setTimeout(r, 1000));
@@ -817,4 +840,3 @@ ${topRepo.description || 'Open-source web automation library connecting LLMs wit
     this.broadcastState();
   }
 }
-

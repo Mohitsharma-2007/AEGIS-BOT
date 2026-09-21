@@ -97,7 +97,7 @@ export function BrowserControls({
 
         {/* New Tab Button */}
         <button
-          onClick={() => newTab('https://www.google.com')}
+          onClick={() => newTab('https://html.duckduckgo.com')}
           className="p-1 rounded-md text-aegis-text-muted hover:text-aegis-text-primary hover:bg-white/[0.06] transition-colors ml-0.5 active:scale-90"
           title="Open new browser tab"
         >

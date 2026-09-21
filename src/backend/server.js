@@ -139,6 +139,9 @@ wss.on('connection', (ws) => {
         case 'browser.manual_scroll':
           await sessionManager.scroll(data.direction, data.amount).catch(e => console.warn('scroll error:', e.message));
           break;
+        case 'agent.input_response':
+          agentController.handleInputResponse(data.id, data.values, data.cancelled);
+          break;
         default:
           break;
       }
@@ -278,6 +281,12 @@ app.post('/api/agent/pause', (req, res) => {
 app.post('/api/agent/resume', (req, res) => {
   agentController.resume();
   res.json({ success: true, status: agentController.status });
+});
+
+app.post('/api/agent/input-response', (req, res) => {
+  const { id, values, cancelled } = req.body || {};
+  const handled = agentController.handleInputResponse(id, values, cancelled);
+  res.json({ success: handled });
 });
 
 app.get('/api/events', (req, res) => {

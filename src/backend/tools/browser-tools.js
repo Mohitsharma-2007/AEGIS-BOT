@@ -225,7 +225,7 @@ export function registerBrowserTools(sessionManager) {
     inputSchema: { url: 'string' },
     permissions: ['navigate'],
     async execute(input) {
-      const tab = await sessionManager.createTab(input.url || 'https://www.google.com');
+      const tab = await sessionManager.createTab(input.url || 'https://html.duckduckgo.com');
       return { success: true, tab_id: tab.id, url: tab.url };
     }
   });
@@ -469,5 +469,125 @@ export function registerBrowserTools(sessionManager) {
     }
   });
 
-  console.log(`[ToolRegistry] Registered 30 AEGIS Tools (including Vision Co-Pilot, Stealth Evasion, Adaptive Planning & Commerce Suite) successfully.`);
+  // 31. browser.human_move_mouse
+  globalToolRegistry.register({
+    name: 'browser.human_move_mouse',
+    description: 'Moves cursor along a natural cubic Bezier curve with micro-jitter and human velocity acceleration.',
+    inputSchema: { x: 'number', y: 'number' },
+    permissions: ['interact'],
+    category: 'Human-Like Mouse Physics',
+    async execute(input) {
+      const page = sessionManager.getActivePage();
+      if (!page) throw new Error('No active page');
+      return await sessionManager.moveMouse(input.x, input.y);
+    }
+  });
+
+  // 32. browser.human_click
+  globalToolRegistry.register({
+    name: 'browser.human_click',
+    description: 'Executes a human click with curved approach trajectory, realistic dwell pause, and hold duration.',
+    inputSchema: { x: 'number', y: 'number', element_id: 'string' },
+    permissions: ['interact'],
+    category: 'Human-Like Mouse Physics',
+    async execute(input) {
+      if (input.element_id) {
+        return await sessionManager.clickElement(input.element_id);
+      }
+      return await sessionManager.click(input.x, input.y);
+    }
+  });
+
+  // 33. browser.solve_challenge
+  globalToolRegistry.register({
+    name: 'browser.solve_challenge',
+    description: 'Detects and solves Cloudflare Turnstile, reCAPTCHA, and bot verification challenges using human curved mouse trajectory interaction.',
+    inputSchema: { max_wait_ms: 'number' },
+    permissions: ['interact', 'stealth'],
+    category: 'Stealth & Anti-Bot Defense',
+    async execute(input) {
+      const page = sessionManager.getActivePage();
+      if (!page) throw new Error('No active page');
+
+      const { globalEventBus } = await import('../events/event-bus.js');
+      globalEventBus.emitEvent('challenge.detected', { type: 'Turnstile/reCAPTCHA' });
+
+      // 1. Wait a few seconds for challenge frame to settle and evaluate if auto-dismissing
+      await new Promise(r => setTimeout(r, 2200));
+
+      // 2. Check if already bypassed automatically
+      const { detectBotWall } = await import('../browser/runtime.js');
+      const initialWall = await detectBotWall(page);
+      if (!initialWall.isBlocked) {
+        return { success: true, method: 'auto_dismiss', message: 'Challenge cleared automatically.' };
+      }
+
+      // 3. Locate Turnstile / reCAPTCHA iframe or checkbox
+      const checkboxBox = await page.evaluate(() => {
+        const turnstileFrame = document.querySelector('iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"]');
+        if (turnstileFrame) {
+          const rect = turnstileFrame.getBoundingClientRect();
+          return {
+            x: Math.round(rect.left + Math.min(35, rect.width * 0.15)),
+            y: Math.round(rect.top + rect.height / 2),
+            width: rect.width,
+            height: rect.height
+          };
+        }
+        const cfBox = document.querySelector('#cf-stage input[type="checkbox"], .cf-turnstile, #challenge-stage');
+        if (cfBox) {
+          const rect = cfBox.getBoundingClientRect();
+          return {
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2),
+            width: rect.width,
+            height: rect.height
+          };
+        }
+        return null;
+      });
+
+      if (checkboxBox) {
+        // Add human slight randomized offset (+- 3px) so clicks aren't machine-centered
+        const clickX = checkboxBox.x + Math.floor((Math.random() - 0.5) * 6);
+        const clickY = checkboxBox.y + Math.floor((Math.random() - 0.5) * 6);
+
+        // Curved human mouse approach and click
+        await sessionManager.click(clickX, clickY);
+
+        // Wait for token resolution
+        await new Promise(r => setTimeout(r, 3500));
+        const postWall = await detectBotWall(page);
+        return {
+          success: !postWall.isBlocked,
+          method: 'human_curved_click',
+          message: postWall.isBlocked ? 'Challenge clicked, awaiting verification' : 'Challenge solved successfully'
+        };
+      }
+
+      return { success: false, reason: 'Checkbox element not directly accessible via viewport' };
+    }
+  });
+
+  // 34. agent.request_input (Human In The Loop)
+  globalToolRegistry.register({
+    name: 'agent.request_input',
+    description: 'Prompts the user via an interactive pop-up modal when credentials, confidential information, or missing parameters are required.',
+    inputSchema: { title: 'string', fields: 'array', reason: 'string' },
+    permissions: ['read', 'write'],
+    category: 'Human-In-The-Loop (HITL)',
+    async execute(input) {
+      const { globalEventBus } = await import('../events/event-bus.js');
+      const requestId = `req-${Date.now()}`;
+      globalEventBus.emitEvent('agent.input_required', {
+        id: requestId,
+        title: input.title || 'Action Input Required',
+        fields: input.fields || [],
+        reason: input.reason || 'Authentication or form completion parameter needed'
+      });
+      return { success: true, requestId, status: 'awaiting_user_input' };
+    }
+  });
+
+  console.log(`[ToolRegistry] Registered 34 AEGIS Tools (including Human-Like Mouse Physics, Challenge Solvers, Vision Co-Pilot & HITL) successfully.`);
 }

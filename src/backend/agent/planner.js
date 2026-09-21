@@ -1,12 +1,32 @@
 import { globalModelRouter } from '../providers/router.js';
+import { extractTaskEntities } from './entity-extractor.js';
 
 /**
  * Decomposes a user task into a structured execution plan checklist.
  */
 export async function generateTaskPlan(taskDescription, currentUrl = '') {
   const taskLower = taskDescription.toLowerCase();
+  const entities = extractTaskEntities(taskDescription);
 
-  // 1. Specialized Shopping Intent Decomposition (Amazon/RTX/Products)
+  // 1. Specialized Authentication / Login Intent Decomposition
+  if (entities.isLogin) {
+    const credInfo = entities.hasCredentials 
+      ? `User ID: ${entities.credentials.username}` 
+      : 'Awaiting User Prompt';
+
+    return {
+      title: 'Authentication & Secure Login Workflow',
+      steps: [
+        { id: 'step-1', title: 'Decompose login intent & verify credentials', target: credInfo, status: 'executing' },
+        { id: 'step-2', title: 'Navigate to target service login surface', target: entities.targetSite || 'Login Destination', status: 'pending' },
+        { id: 'step-3', title: 'Locate and verify username/email input field', target: 'Username Field', status: 'pending' },
+        { id: 'step-4', title: 'Locate password field (request input if missing)', target: 'Password Field', status: 'pending' },
+        { id: 'step-5', title: 'Submit credentials and verify authenticated state', target: 'Session Confirmation', status: 'pending' }
+      ]
+    };
+  }
+
+  // 2. Specialized Shopping Intent Decomposition (Amazon/RTX/Products)
   if (taskLower.includes('amazon') || taskLower.includes('laptop') || taskLower.includes('price') || taskLower.includes('buy')) {
     const budgetMatch = taskDescription.match(/under\s+([\d,\.]+\s*(?:lakhs?|k|inr|rs)?)/i);
     const budgetStr = budgetMatch ? budgetMatch[1] : '';
@@ -23,7 +43,7 @@ export async function generateTaskPlan(taskDescription, currentUrl = '') {
     };
   }
 
-  // 2. Specialized GitHub Research Intent Decomposition
+  // 3. Specialized GitHub Research Intent Decomposition
   if (taskLower.includes('github') || taskLower.includes('repo')) {
     return {
       title: 'GitHub Research & Note Compilation',
@@ -37,7 +57,7 @@ export async function generateTaskPlan(taskDescription, currentUrl = '') {
     };
   }
 
-  // 3. Fallback LLM-based plan generation
+  // 4. Fallback LLM-based plan generation
   const prompt = `You are the AEGIS BOT Execution Planner.
 Given a user browser task, create a concise, user-facing checklist of 4 to 5 logical milestone steps.
 
@@ -98,20 +118,40 @@ export function adaptPlanOnDeviation(currentPlan, deviationReason, context = {})
 
   const steps = [...currentPlan.steps];
 
-  if (deviationReason === 'bot_challenge') {
-    // Insert evasive stealth pivot step
+  // SCENARIO 1: Cloudflare Turnstile / Google reCAPTCHA Challenge
+  if (deviationReason === 'cloudflare_challenge' || deviationReason === 'recaptcha_challenge' || deviationReason === 'bot_challenge') {
     return {
       ...currentPlan,
-      title: `${currentPlan.title} (Adaptive Evasion)`,
+      title: `${currentPlan.title} (Resolving Security Challenge)`,
       isAdapted: true,
       steps: [
-        { id: 'adapt-1', title: '✓ Bot challenge detected on search engine', target: 'Security Challenge', status: 'completed', isAdapted: true },
-        { id: 'adapt-2', title: 'Execute stealth pivot to direct store URL', target: context.pivotUrl || 'Direct Destination', status: 'executing', isAdapted: true },
-        ...steps.slice(2).map(s => ({ ...s, isAdapted: true }))
+        { id: 'sec-1', title: '✓ Security challenge barrier encountered', target: context.type || 'Cloudflare / reCAPTCHA', status: 'completed', isAdapted: true },
+        { id: 'sec-2', title: 'Wait 2-3s for frame settling & auto-dismissal check', target: 'Settling Delay', status: 'executing', isAdapted: true },
+        { id: 'sec-3', title: 'Approach challenge checkbox with curved human mouse physics', target: 'Cubic Bezier Click', status: 'pending', isAdapted: true },
+        { id: 'sec-4', title: 'Observe page reload & verify fresh DOM state', target: 'Post-Reload Observation', status: 'pending', isAdapted: true },
+        { id: 'sec-5', title: 'Confirm verified destination and resume workflow', target: 'Action Confirmation', status: 'pending', isAdapted: true },
+        ...steps.filter(s => s.status !== 'completed').map(s => ({ ...s, isAdapted: true }))
       ]
     };
   }
 
+  // SCENARIO 2: Interactive User Input Required (HITL Pop-up for Credentials / Confidential Data)
+  if (deviationReason === 'auth_required' || deviationReason === 'input_required') {
+    return {
+      ...currentPlan,
+      title: `${currentPlan.title} (Awaiting User Input)`,
+      isAdapted: true,
+      steps: [
+        { id: 'hitl-1', title: 'Form requires credentials or confidential inputs', target: context.fieldLabel || 'Authentication Form', status: 'completed', isAdapted: true },
+        { id: 'hitl-2', title: 'Trigger interactive HITL pop-up modal for user input', target: 'Modal Displayed', status: 'executing', isAdapted: true },
+        { id: 'hitl-3', title: 'Receive user-entered data and inject into fields', target: 'Secure Field Fill', status: 'pending', isAdapted: true },
+        { id: 'hitl-4', title: 'Verify form values and confirm submission', target: 'Form Submission', status: 'pending', isAdapted: true },
+        ...steps.filter(s => s.status !== 'completed').map(s => ({ ...s, isAdapted: true }))
+      ]
+    };
+  }
+
+  // SCENARIO 3: Zero search results found
   if (deviationReason === 'zero_results') {
     return {
       ...currentPlan,

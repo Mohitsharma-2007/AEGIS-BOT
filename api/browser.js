@@ -61,6 +61,20 @@ export default async function handler(req, res) {
   const action = req.body?.action || req.query.action || 'navigate';
 
   let targetUrl = urlParam || resolveIntentUrl(rawQuery, 'https://www.amazon.in');
+
+  // Automatic datacenter block prevention: Google blocks AWS/Vercel serverless IPs
+  if (targetUrl.includes('google.com/search') || targetUrl.includes('google.com')) {
+    try {
+      const u = new URL(targetUrl);
+      const q = u.searchParams.get('q');
+      targetUrl = q 
+        ? `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`
+        : 'https://html.duckduckgo.com';
+    } catch {
+      targetUrl = 'https://html.duckduckgo.com';
+    }
+  }
+
   const toolCalls = [];
   const notes = [];
 

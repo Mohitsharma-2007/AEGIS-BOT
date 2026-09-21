@@ -25,6 +25,7 @@ export function useAegisSocket() {
   const [notes, setNotes] = useState([]);
   const [latestThought, setLatestThought] = useState(null);
   const [turboMode, setTurboMode] = useState(true);
+  const [pendingInputRequest, setPendingInputRequest] = useState(null);
 
   const wsRef = useRef(null);
 
@@ -52,8 +53,8 @@ export function useAegisSocket() {
         })
         .catch(() => {});
 
-      // 2. Fetch initial browser canvas frame from serverless Chromium
-      fetch('/api/browser?url=https://www.google.com')
+      // 2. Fetch initial browser canvas frame from serverless Chromium (avoiding Google datacenter block)
+      fetch('/api/browser?url=https://html.duckduckgo.com')
         .then(r => r.json())
         .then(data => {
           if (data.frame) setScreencastFrame(data.frame);
@@ -159,9 +160,16 @@ export function useAegisSocket() {
         setTurboMode(Boolean(data.payload.turboMode));
         break;
 
+      case 'agent_input_required':
+        setPendingInputRequest(data.payload);
+        break;
+
       case 'event':
         const evt = data.payload;
         setEvents((prev) => [evt, ...prev.slice(0, 150)]);
+        if (evt.type === 'agent.input_required') {
+          setPendingInputRequest(evt.data || evt.payload);
+        }
 
         // Filter into categorized panels
         if (evt.type.startsWith('tool.')) {
@@ -345,6 +353,30 @@ export function useAegisSocket() {
     } catch {}
   }, [send]);
 
+  const submitInputResponse = useCallback((id, values) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      send('agent.input_response', { id, values });
+    }
+    fetch('/api/agent/input-response', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, values })
+    }).catch(() => {});
+    setPendingInputRequest(null);
+  }, [send]);
+
+  const cancelInputRequest = useCallback((id) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      send('agent.input_response', { id, values: null, cancelled: true });
+    }
+    fetch('/api/agent/input-response', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, values: null, cancelled: true })
+    }).catch(() => {});
+    setPendingInputRequest(null);
+  }, [send]);
+
   return {
     connected,
     agentState,
@@ -365,6 +397,9 @@ export function useAegisSocket() {
     latestThought,
     turboMode,
     toggleTurbo,
+    pendingInputRequest,
+    submitInputResponse,
+    cancelInputRequest,
     runTask,
     stopAgent,
     pauseAgent,

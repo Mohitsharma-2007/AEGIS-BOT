@@ -10,6 +10,7 @@ import { ToolCallStream } from './components/ToolCallStream.jsx';
 import { AgentNotesCard } from './components/AgentNotesCard.jsx';
 import { AegisChatInput } from './components/AegisChatInput.jsx';
 import { DevToolsDrawer } from './components/DevToolsDrawer.jsx';
+import { AegisPromptModal } from './components/AegisPromptModal.jsx';
 
 export function App() {
   const {
@@ -32,6 +33,9 @@ export function App() {
     latestThought,
     turboMode,
     toggleTurbo,
+    pendingInputRequest,
+    submitInputResponse,
+    cancelInputRequest,
     runTask,
     stopAgent,
     pauseAgent,
@@ -166,6 +170,13 @@ export function App() {
           refreshA11y={refreshA11y}
         />
       </div>
+
+      {/* 4. Interactive Human-In-The-Loop Prompt Modal */}
+      <AegisPromptModal
+        request={pendingInputRequest}
+        onSubmit={submitInputResponse}
+        onCancel={cancelInputRequest}
+      />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { globalEventBus } from '../events/event-bus.js';
 import { extractInteractiveDom, highlightElement, clearHighlight } from './dom-extractor.js';
 import { extractAccessibilityTree } from './a11y-extractor.js';
 import { getBrowserRuntime, applyStealthPatches, detectBotWall } from './runtime.js';
+import { humanMoveMouse, humanClick } from './human-cursor.js';
 
 export class BrowserSessionManager {
   constructor(options = {}) {
@@ -50,8 +51,8 @@ export class BrowserSessionManager {
       // Inject modern anti-bot stealth scripts
       await applyStealthPatches(this.context);
 
-      // Create initial tab
-      await this.createTab('https://www.google.com');
+      // Create initial tab (DuckDuckGo avoids datacenter bot blocks)
+      await this.createTab('https://html.duckduckgo.com');
 
       globalEventBus.emitEvent('session.ready', {
         session_id: this.sessionId,
@@ -67,7 +68,7 @@ export class BrowserSessionManager {
     }
   }
 
-  async createTab(url = 'https://www.google.com') {
+  async createTab(url = 'https://html.duckduckgo.com') {
     const tabId = `tab-${String(this.tabCounter++).padStart(3, '0')}`;
     const page = await this.context.newPage();
 
@@ -272,7 +273,7 @@ export class BrowserSessionManager {
       if (remaining.length > 0) {
         await this.switchTab(remaining[0]);
       } else {
-        await this.createTab('https://www.google.com');
+        await this.createTab('https://html.duckduckgo.com');
       }
     }
 
@@ -298,7 +299,7 @@ export class BrowserSessionManager {
       if (url.includes('.') && !url.includes(' ')) {
         url = `https://${url}`;
       } else {
-        url = `https://www.google.com/search?q=${encodeURIComponent(url)}`;
+        url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(url)}`;
       }
     }
 
@@ -343,29 +344,17 @@ export class BrowserSessionManager {
 
     const startX = this.mouse.x;
     const startY = this.mouse.y;
-    const steps = options.steps || 12;
-    const durationMs = options.durationMs || 250;
-    const stepDelay = Math.max(8, Math.floor(durationMs / steps));
 
     globalEventBus.emitEvent('mouse.move_started', {
       from: { x: startX, y: startY },
       to: { x: targetX, y: targetY }
     });
 
-    for (let i = 1; i <= steps; i++) {
-      const progress = i / steps;
-      // Cubic easing for natural movement
-      const ease = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-      const curX = Math.round(startX + (targetX - startX) * ease);
-      const curY = Math.round(startY + (targetY - startY) * ease);
-
+    // Humanized Bezier curved movement with randomized velocity & micro-tremor
+    await humanMoveMouse(page, startX, startY, targetX, targetY, (curX, curY) => {
       this.mouse = { x: curX, y: curY };
-      await page.mouse.move(curX, curY).catch(() => {});
-
-      // Broadcast mouse location live for frontend cursor animation
       globalEventBus.emit('mouse.position', { x: curX, y: curY, state: 'moving' });
-      await new Promise(r => setTimeout(r, stepDelay));
-    }
+    });
 
     this.mouse = { x: targetX, y: targetY };
     globalEventBus.emitEvent('mouse.move_completed', { x: targetX, y: targetY });
@@ -379,10 +368,13 @@ export class BrowserSessionManager {
     const clickX = x !== undefined ? x : this.mouse.x;
     const clickY = y !== undefined ? y : this.mouse.y;
 
-    // Move first if coordinates provided
-    if (x !== undefined && y !== undefined && (x !== this.mouse.x || y !== this.mouse.y)) {
-      await this.moveMouse(x, y, { steps: 8, durationMs: 150 });
-    }
+    // Human-like click with Bezier curve approach, pre-click dwell, and realistic hold
+    await humanClick(page, this.mouse, clickX, clickY, options, (curX, curY) => {
+      this.mouse = { x: curX, y: curY };
+      globalEventBus.emit('mouse.position', { x: curX, y: curY, state: 'moving' });
+    });
+
+    this.mouse = { x: clickX, y: clickY };
 
     globalEventBus.emit('mouse.click_indicator', {
       x: clickX,
@@ -394,11 +386,6 @@ export class BrowserSessionManager {
       x: clickX,
       y: clickY,
       button: options.button || 'left'
-    });
-
-    await page.mouse.click(clickX, clickY, {
-      button: options.button || 'left',
-      delay: options.delay || 40
     });
 
     return { success: true, x: clickX, y: clickY };
