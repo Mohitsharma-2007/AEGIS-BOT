@@ -473,12 +473,134 @@ Return STRICT JSON:
   }
 
   /**
+   * Dedicated Continuous Visual & Structural Page Observation:
+   * Captures live page screenshot on every navigation or state transition,
+   * inspects the visual canvas with Vision Assistant, and runs DOM inspectors to verify
+   * if a Cloudflare challenge, Turnstile checkbox, or CAPTCHA barrier is present.
+   * If detected, handles challenge resolution with human curved mouse physics
+   * BEFORE any form filling or HITL credential popups are ever triggered.
+   */
+  async observePageLoadAndDetectChallenges(activeTab, signal) {
+    if (!activeTab || !activeTab.page) return false;
+
+    // 1. Wait for page load state and visual layout to settle
+    try {
+      await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 4500 });
+    } catch {}
+    await new Promise(r => setTimeout(r, 600));
+
+    // 2. Capture fresh canvas screenshot of the page view
+    let screenshotBase64 = null;
+    try {
+      screenshotBase64 = await this.sessionManager.getScreenshot(false);
+      if (screenshotBase64) {
+        globalEventBus.emit('screencast.frame', { frame: screenshotBase64 });
+      }
+    } catch (e) {
+      console.warn('[Observation Screenshot Warning]:', e.message);
+    }
+
+    // 3. Structural Bot & Challenge Detection in DOM
+    const { detectBotWall } = await import('../browser/runtime.js');
+    const botStatus = await detectBotWall(activeTab.page);
+
+    // 4. Visual Vision Assistant Inspection on the screenshot
+    let visionAnalysis = null;
+    if (screenshotBase64) {
+      try {
+        visionAnalysis = await globalVisionAssistant.inspectCanvas(screenshotBase64, this.currentTask);
+      } catch (err) {
+        console.warn('[Vision Inspection Warning]:', err.message);
+      }
+    }
+
+    // 5. Deep Check for Turnstile / reCAPTCHA iframe and stages
+    const hasChallengeWidget = await activeTab.page.evaluate(() => {
+      const frame = document.querySelector(
+        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[title*="cloudflare"], iframe[title*="turnstile"], iframe[title*="widget containing a cloudflare security challenge"]'
+      );
+      if (frame) return true;
+
+      const stage = document.querySelector(
+        '#challenge-stage, #cf-stage, .cf-turnstile, #turnstile-wrapper, #challenge-running, #cf-challenge-running, #cf-wrapper'
+      );
+      if (stage) {
+        const rect = stage.getBoundingClientRect();
+        return rect.width > 10 && rect.height > 10;
+      }
+
+      const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+      return (
+        bodyText.includes('just a moment') ||
+        bodyText.includes('checking your browser') ||
+        bodyText.includes('verify you are human') ||
+        bodyText.includes('verifying you are human')
+      );
+    }).catch(() => false);
+
+    const isChallengeDetected = Boolean(
+      botStatus.isBlocked ||
+      hasChallengeWidget ||
+      visionAnalysis?.is_blocked ||
+      visionAnalysis?.has_cloudflare ||
+      visionAnalysis?.blocker_type === 'cloudflare' ||
+      visionAnalysis?.blocker_type === 'captcha' ||
+      visionAnalysis?.page_type === 'bot_challenge'
+    );
+
+    if (isChallengeDetected) {
+      const challengeType = botStatus.keyword || visionAnalysis?.blocker_type || 'Cloudflare Security Challenge';
+      this.emitThought(`👁️ [Visual Page Inspection]: Security challenge barrier detected on screenshot (${challengeType}). Holding all form actions & credential prompts...`, 'recovery');
+
+      // Update plan dynamically with security challenge milestone steps
+      this.plan = adaptPlanOnDeviation(this.plan, 'cloudflare_challenge', { type: challengeType });
+      globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
+      this.broadcastState();
+
+      // Step A: Wait 2.5 seconds to observe if challenge clears automatically
+      this.emitThought(`Observing challenge frame for 2.5s for automatic resolution...`, 'recovery');
+      await new Promise(r => setTimeout(r, 2500));
+
+      if (signal.aborted) return true;
+
+      // Step B: If still present, solve using human-like curved mouse clicks
+      this.emitThought(`Engaging curved Bezier human cursor interaction on challenge checkbox...`, 'action');
+      const solveRes = await globalToolRegistry.execute('browser.solve_challenge', {});
+
+      // Step C: Observe page reload & verify fresh DOM state
+      this.emitThought(`Observing post-challenge page reload and capturing updated screenshot...`, 'observation');
+      try {
+        await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 });
+      } catch {}
+      await new Promise(r => setTimeout(r, 1800));
+
+      // Re-capture post-challenge screenshot
+      const postFrame = await this.sessionManager.getScreenshot(false).catch(() => null);
+      if (postFrame) {
+        globalEventBus.emit('screencast.frame', { frame: postFrame });
+      }
+
+      const postCheck = await detectBotWall(activeTab.page);
+      if (!postCheck.isBlocked) {
+        this.emitThought(`✓ Security challenge cleared and visually verified! Resuming primary workflow...`, 'observation');
+      } else {
+        await globalToolRegistry.execute('browser.stealth_evade', {});
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      return true; // Challenge was detected and handled
+    }
+
+    return false; // Page is clean and ready
+  }
+
+  /**
    * GENERAL REACT INTERACTIVE BROWSER AGENT LOOP
    * Features:
-   * 1. Smart Entity Extraction & Credential Mapping (Prevents prompt string dumping)
-   * 2. Interactive Human-In-The-Loop (HITL) Pop-up modal when inputs or confidential info is needed
-   * 3. Cloudflare Turnstile & reCAPTCHA solver using Cubic Bezier human curved mouse physics
-   * 4. Post-reload state observation, DOM extraction, and action verification
+   * 1. Continuous Visual Page Observation via Live Canvas Screenshots & Vision Sidecar
+   * 2. Cloudflare Turnstile & reCAPTCHA solver using Cubic Bezier curved mouse physics
+   * 3. Smart Entity Extraction & Credential Mapping (Prevents prompt string dumping)
+   * 4. Interactive Human-In-The-Loop (HITL) Pop-up modal when inputs are verified and required
    */
   async executeGeneralInteractiveLoop(intent, signal) {
     let stepCount = 0;
@@ -518,59 +640,21 @@ Return STRICT JSON:
           this.broadcastState();
           await globalToolRegistry.execute('browser.navigate', { url: targetUrl });
           await new Promise(r => setTimeout(r, 1400));
+          // Observe visual screenshot immediately after initial navigation
+          await this.observePageLoadAndDetectChallenges(activeTab, signal);
           continue;
         }
       }
 
       // =========================================================================
-      // 2. Anti-Bot & Cloudflare / reCAPTCHA Challenge Handling
+      // 2. Continuous Visual Screenshot Observation & Challenge Check
       // =========================================================================
-      const botCheck = await globalToolRegistry.execute('browser.detect_wall', {});
-      if (botCheck.output?.isBlocked) {
-        this.emitThought(`Detected security blocker (${botCheck.output.keyword}). Dynamically updating execution plan...`, 'recovery');
-        this.plan = adaptPlanOnDeviation(this.plan, 'cloudflare_challenge', { type: botCheck.output.keyword });
-        globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
-        this.broadcastState();
-
-        // Step 2.1: Wait 2-3 seconds to observe if challenge clears automatically
-        this.emitThought(`Waiting 2.5s for challenge frame to stabilize and evaluate auto-clear...`, 'recovery');
-        await new Promise(r => setTimeout(r, 2500));
-
-        // Step 2.2: Execute curved human mouse solver for Cloudflare Turnstile / reCAPTCHA
-        this.emitThought(`Applying curved Bezier human cursor interaction to solve security challenge...`, 'action');
-        const solveRes = await globalToolRegistry.execute('browser.solve_challenge', {});
-
-        // Step 2.3: Observe page reload & verify complete DOM state
-        this.emitThought(`Observing post-challenge page reload and verifying DOM state...`, 'observation');
-        if (activeTab.page) {
-          await activeTab.page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
-        }
-        await new Promise(r => setTimeout(r, 1500));
-
-        const postCheck = await globalToolRegistry.execute('browser.detect_wall', {});
-        if (!postCheck.output?.isBlocked) {
-          this.emitThought(`✓ Security challenge successfully bypassed! Resuming plan execution...`, 'observation');
-        } else {
-          // If still blocked, execute evasive pivot
-          await globalToolRegistry.execute('browser.stealth_evade', {});
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-
-      // Side-by-side Vision Model verification
-      if (stepCount === 1 || stepCount % 3 === 0) {
-        try {
-          const frame = await this.sessionManager.getScreenshot(false);
-          if (frame) {
-            const vision = await globalVisionAssistant.inspectCanvas(frame, this.currentTask);
-            if (vision?.is_blocked) {
-              this.emitThought(`👁️ [Vision Co-Pilot]: Visual blocker detected (${vision.blocker_type}). Adapting plan...`, 'recovery');
-              this.plan = adaptPlanOnDeviation(this.plan, 'cloudflare_challenge');
-              globalEventBus.emitEvent('agent.plan_adapted', { plan: this.plan });
-              this.broadcastState();
-            }
-          }
-        } catch {}
+      this.emitThought(`Observing live page load screenshot & verifying visual barrier status...`, 'observation');
+      const challengeHandled = await this.observePageLoadAndDetectChallenges(activeTab, signal);
+      if (signal.aborted) break;
+      if (challengeHandled) {
+        // If a challenge was handled, loop to re-observe the fresh post-challenge state
+        continue;
       }
 
       // =========================================================================
@@ -601,9 +685,15 @@ Return STRICT JSON:
 
       // SCENARIO: Login/Auth Surface Detected but Credentials Missing -> Trigger HITL Pop-up!
       if (isAuthSurface) {
+        // SAFETY GATE: Verify visual screenshot once more to ensure Cloudflare isn't covering the screen
+        const isChallengeCovering = await this.observePageLoadAndDetectChallenges(activeTab, signal);
+        if (isChallengeCovering) {
+          continue; // Cloudflare challenge is active! Do NOT ask for credentials yet!
+        }
+
         let creds = this.sessionCredentials || intent.credentials;
         if (!creds || !creds.username || !creds.password) {
-          this.emitThought(`Authentication surface detected on ${activeTab.url}. Requesting credentials via interactive pop-up modal...`, 'reasoning');
+          this.emitThought(`Visually verified login surface on ${activeTab.url}. Requesting credentials via interactive pop-up modal...`, 'reasoning');
 
           const userProvided = await this.requestUserInput({
             title: 'Account Credentials Required',

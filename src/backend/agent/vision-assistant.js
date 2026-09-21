@@ -27,13 +27,15 @@ export class VisionAssistant {
 
     const systemPrompt = `You are the AEGIS Vision Assistant sidecar.
 Analyze the provided browser canvas screenshot alongside the user's goal: "${userGoal}".
+CRITICAL: Carefully check if the page shows a Cloudflare challenge ("Just a moment...", Turnstile checkbox, "Verify you are human", Cloudflare logo, or ray ID), Google reCAPTCHA, or bot challenge.
 Return a concise JSON response with:
 {
-  "is_blocked": boolean, // true if CAPTCHA, bot wall ("unusual traffic"), Cloudflare Turnstile, or blocking modal is visible
-  "blocker_type": "none" | "captcha" | "unusual_traffic" | "cookie_wall" | "login_required",
-  "page_type": "search_results" | "product_page" | "article" | "bot_challenge" | "home_page",
+  "is_blocked": boolean, // true if Cloudflare Turnstile, Cloudflare "Just a moment", CAPTCHA, bot barrier, or security check is visible
+  "has_cloudflare": boolean, // true if Cloudflare Turnstile, checkbox, or "Just a moment" screen is visible
+  "blocker_type": "none" | "cloudflare" | "captcha" | "unusual_traffic" | "cookie_wall",
+  "page_type": "bot_challenge" | "login_page" | "search_results" | "product_page" | "article" | "home_page",
   "key_findings": ["brief description of 2-3 main visual elements found"],
-  "recommended_action": "brief directive for main agent (e.g. 'pivot to direct amazon catalog', 'click search input at top', 'extract product list')"
+  "recommended_action": "e.g. 'wait and solve cloudflare turnstile checkbox', 'fill login credentials', 'extract results'"
 }
 Respond with raw JSON only.`;
 

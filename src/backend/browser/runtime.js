@@ -71,12 +71,35 @@ export async function detectBotWall(page) {
         return { isBlocked: true, keyword: 'network_reset_or_datacenter_block', title: 'Network Blocked' };
       }
 
+      // 1. Direct Cloudflare Turnstile / reCAPTCHA / hCaptcha iframe check
+      const challengeIframe = document.querySelector(
+        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="cf-turnstile"], iframe[title*="cloudflare"], iframe[title*="turnstile"], iframe[title*="widget containing a cloudflare security challenge"]'
+      );
+      if (challengeIframe) {
+        return { isBlocked: true, keyword: 'cloudflare_turnstile_iframe', title: document.title };
+      }
+
+      // 2. Cloudflare Challenge Stages & Containers
+      const challengeStage = document.querySelector(
+        '#challenge-stage, #cf-stage, .cf-turnstile, #turnstile-wrapper, #challenge-running, #cf-challenge-running, #cf-wrapper, #challenge-form'
+      );
+      if (challengeStage) {
+        const rect = challengeStage.getBoundingClientRect();
+        if (rect.width > 10 && rect.height > 10) {
+          return { isBlocked: true, keyword: 'cloudflare_turnstile_stage', title: document.title };
+        }
+      }
+
+      // 3. Text and title analysis
       const text = (document.body ? document.body.innerText : '').toLowerCase();
       const title = (document.title || '').toLowerCase();
       
       const botKeywords = [
-        'unusual traffic',
+        'just a moment',
+        'checking your browser',
         'verify you are human',
+        'verifying you are human',
+        'unusual traffic',
         'press & hold',
         'press and hold',
         'cloudflare turnstile',
@@ -86,7 +109,8 @@ export async function detectBotWall(page) {
         'security check to access',
         'why did this happen',
         'access denied',
-        '403 forbidden'
+        '403 forbidden',
+        'enable javascript and cookies to continue'
       ];
 
       for (const kw of botKeywords) {
@@ -94,6 +118,12 @@ export async function detectBotWall(page) {
           return { isBlocked: true, keyword: kw, title: document.title };
         }
       }
+
+      // 4. Ray ID / Cloudflare signature check in footer
+      if (text.includes('ray id') && (text.includes('cloudflare') || text.includes('performance & security by cloudflare'))) {
+        return { isBlocked: true, keyword: 'cloudflare_ray_id', title: document.title };
+      }
+
       return { isBlocked: false };
     });
   } catch {
